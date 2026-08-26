@@ -161,6 +161,14 @@ export const initialChainConnections = [
 		priority: 75,
 	},
 	{
+		id: "rpc-bsc-1rpc",
+		network: "bsc",
+		name: "BSC 1RPC",
+		url: "https://public.1rpc.io/bnb",
+		enabled: true,
+		priority: 40,
+	},
+	{
 		id: "rpc-polygon-default",
 		network: "polygon",
 		name: "Polygon Public RPC",

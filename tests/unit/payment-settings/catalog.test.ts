@@ -86,11 +86,17 @@ describe("payment infrastructure catalog", () => {
 				connection.transport === "http" &&
 				connection.enabled,
 		);
-		expect(bscHttpConnections.length).toBeGreaterThanOrEqual(3);
+		expect(bscHttpConnections.length).toBeGreaterThanOrEqual(4);
 		expect(
 			bscHttpConnections.filter((connection) =>
 				new URL(connection.endpoint).hostname.endsWith("bnbchain.org"),
 			),
 		).toHaveLength(2);
+		expect(
+			bscHttpConnections.some(
+				(connection) =>
+					new URL(connection.endpoint).hostname === "public.1rpc.io",
+			),
+		).toBe(true);
 	});
 });
