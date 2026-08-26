@@ -37,6 +37,29 @@ describe("JSON-RPC transports", () => {
 		});
 	});
 
+	it("injects an encrypted credential into an RPC endpoint template", async () => {
+		const fetcher = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(
+				Response.json({ jsonrpc: "2.0", id: 1, result: "0x38" }),
+			);
+		await expect(
+			requestJsonRpc<string>({
+				url: "https://rpc.example/bsc/__API_KEY__",
+				method: "eth_chainId",
+				params: [],
+				timeoutMs: 1_000,
+				apiKey: "read-only/key",
+			}),
+		).resolves.toBe("0x38");
+		expect(fetcher.mock.calls[0]?.[0]).toBe(
+			"https://rpc.example/bsc/read-only%2Fkey",
+		);
+		expect(fetcher.mock.calls[0]?.[1]?.headers).not.toHaveProperty(
+			"authorization",
+		);
+	});
+
 	it("performs a request-response exchange over WSS", async () => {
 		globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
 		await expect(
