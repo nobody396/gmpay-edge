@@ -55,6 +55,7 @@ export const updateChainPaymentConnectionInput = paymentConnectionIdInput
 	.extend({
 		...connectionFields.shape,
 		...evmScanConfigFields,
+		apiKey: z.string().trim().max(512).optional(),
 	})
 	.strict()
 	.refine(transportMatchesEndpoint, connectionProtocolIssue);

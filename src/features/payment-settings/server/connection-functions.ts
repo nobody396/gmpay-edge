@@ -10,7 +10,10 @@ import {
 	updateProviderPaymentConnectionInput,
 } from "#/features/payment-settings/schema";
 import { adminContext } from "#/features/payment-settings/server/admin-context";
-import { loadPaymentConnectionApiKey } from "#/features/payment-settings/server/connection-credentials";
+import {
+	encryptPaymentConnectionCredential,
+	loadPaymentConnectionApiKey,
+} from "#/features/payment-settings/server/connection-credentials";
 import { testPaymentConnection } from "#/features/payment-settings/server/connection-health";
 
 const railKindSchema = z.enum(["chain", "exchange", "wallet"]);
@@ -217,9 +220,11 @@ export const updateChainConnectionFn = createServerFn({ method: "POST" })
 			},
 			context.runtime,
 		);
+		const replacementApiKey = data.apiKey?.trim() || null;
 		const connectivityChanged =
 			current.transport !== data.transport ||
-			current.endpoint !== data.endpoint;
+			current.endpoint !== data.endpoint ||
+			Boolean(replacementApiKey);
 		const scanConfig = evmRailCodes.has(current.rail_code)
 			? data
 			: {
@@ -229,6 +234,26 @@ export const updateChainConnectionFn = createServerFn({ method: "POST" })
 					maxScanTransactions: undefined,
 				};
 		const now = Date.now();
+		const credentialStatement = replacementApiKey
+			? context.db
+					.prepare(
+						`INSERT INTO payment_ingress_credentials
+						 (payment_ingress_id, config_encrypted, created_at, updated_at)
+						 VALUES (?, ?, ?, ?)
+						 ON CONFLICT(payment_ingress_id) DO UPDATE SET
+						 config_encrypted = excluded.config_encrypted,
+						 updated_at = excluded.updated_at`,
+					)
+					.bind(
+						data.id,
+						await encryptPaymentConnectionCredential(
+							replacementApiKey,
+							context.runtime.integrationConfigSecret,
+						),
+						now,
+						now,
+					)
+			: null;
 		await context.db.batch([
 			context.db
 				.prepare(
@@ -257,6 +282,7 @@ export const updateChainConnectionFn = createServerFn({ method: "POST" })
 					now,
 					data.id,
 				),
+			...(credentialStatement ? [credentialStatement] : []),
 			context.db
 				.prepare(
 					`INSERT INTO audit_logs
@@ -280,7 +306,7 @@ export const updateChainConnectionFn = createServerFn({ method: "POST" })
 						blockLookback: current.block_lookback,
 						logBlockRange: current.log_block_range,
 						maxScanTransactions: current.max_scan_transactions,
-						hasApiKey: Boolean(currentApiKey),
+						hasApiKey: Boolean(replacementApiKey || currentApiKey),
 					}),
 					JSON.stringify({
 						name: data.name,

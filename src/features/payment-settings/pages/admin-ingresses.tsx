@@ -542,6 +542,14 @@ function ChainConnectionForm({
 			schema={[
 				{ name: "name", label: m.common_name(), required: true },
 				{
+					name: "apiKey",
+					label: m.infrastructure_provider_api_key(),
+					valueType: "password",
+					description: connection.has_api_key
+						? m.settings_secret_configured()
+						: undefined,
+				},
+				{
 					name: "transport",
 					label: m.infrastructure_transport(),
 					valueType: "select",
@@ -591,6 +599,7 @@ function ChainConnectionForm({
 							| "websocket",
 						endpoint: String(values.endpoint ?? ""),
 						priority: Number(values.priority ?? 100),
+						apiKey: String(values.apiKey ?? "").trim() || undefined,
 						...(isEvmRail(connection.rail_code)
 							? evmScanConfigValues(values)
 							: {}),
