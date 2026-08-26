@@ -145,6 +145,22 @@ export const initialChainConnections = [
 		enabled: true,
 	},
 	{
+		id: "rpc-bsc-binance-primary",
+		network: "bsc",
+		name: "BSC Official RPC",
+		url: "https://bsc-dataseed.bnbchain.org/",
+		enabled: true,
+		priority: 50,
+	},
+	{
+		id: "rpc-bsc-binance-secondary",
+		network: "bsc",
+		name: "BSC Official RPC Secondary",
+		url: "https://bsc-dataseed-public.bnbchain.org/",
+		enabled: true,
+		priority: 75,
+	},
+	{
 		id: "rpc-polygon-default",
 		network: "polygon",
 		name: "Polygon Public RPC",

@@ -77,4 +77,20 @@ describe("payment infrastructure catalog", () => {
 			expect(websocket).toMatchObject({ enabled: false, priority: 200 });
 		}
 	});
+
+	it("keeps redundant official BSC HTTP RPC connections enabled", () => {
+		const bscHttpConnections = initialPaymentConnections.filter(
+			(connection) =>
+				connection.type === "rpc" &&
+				connection.railCode === "bsc" &&
+				connection.transport === "http" &&
+				connection.enabled,
+		);
+		expect(bscHttpConnections.length).toBeGreaterThanOrEqual(3);
+		expect(
+			bscHttpConnections.filter((connection) =>
+				new URL(connection.endpoint).hostname.endsWith("bnbchain.org"),
+			),
+		).toHaveLength(2);
+	});
 });
