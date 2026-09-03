@@ -381,10 +381,7 @@ async function loadDueMaintenanceWork(
 		orderExpiration: row?.order_expiration === 1,
 		cryptoRateSync:
 			row?.crypto_rates === 1 && isRateSyncDue(cryptoRateConfiguration, now),
-		fiatRateSync:
-			"credentials" in fiatRateConfiguration &&
-			Boolean(fiatRateConfiguration.credentials.apiKey) &&
-			isRateSyncDue(fiatRateConfiguration, now),
+		fiatRateSync: isRateSyncDue(fiatRateConfiguration, now),
 		webhookOutbox: row?.webhook_outbox === 1,
 		paymentEventOutbox: row?.payment_event_outbox === 1,
 		inboundNotifications: row?.inbound_notifications === 1,
