@@ -12,6 +12,7 @@ import {
 	fetchCryptoRateQuotes,
 	fetchExchangeRateQuote,
 	fetchFiatRates,
+	fetchFrankfurterRates,
 	refreshExchangeRates,
 	saveRateSyncConfiguration,
 } from "#/features/payment-settings/server/exchange-rates";
@@ -317,6 +318,77 @@ describe("exchange-rate refresh", () => {
 		const requestedUrl = new URL(String(request.mock.calls[0]?.[0]));
 		expect(requestedUrl.searchParams.get("currencies")).toBeNull();
 		expect(requestedUrl.searchParams.get("source")).toBeNull();
+	});
+
+	it("uses Frankfurter as the keyless fiat-rate fallback", async () => {
+		const request = vi.fn((_url: string) =>
+			Promise.resolve(
+				Response.json([
+					{ date: "2026-09-03", base: "USD", quote: "CNY", rate: 6.7189 },
+					{ date: "2026-09-03", base: "USD", quote: "JPY", rate: 147.2 },
+				]),
+			),
+		);
+		await expect(
+			fetchFrankfurterRates("USD", ["CNY", "JPY"], request),
+		).resolves.toEqual({ CNY: "6.7189", JPY: "147.2" });
+		const requestedUrl = new URL(String(request.mock.calls[0]?.[0]));
+		expect(requestedUrl.origin).toBe("https://api.frankfurter.dev");
+		expect(requestedUrl.pathname).toBe("/v2/rates");
+		expect(requestedUrl.searchParams.get("base")).toBe("USD");
+		expect(requestedUrl.searchParams.get("quotes")).toBe("CNY,JPY");
+	});
+
+	it("persists adjusted Frankfurter rates when no paid provider key exists", async () => {
+		const now = 1_800_000_500_000;
+		const request = vi.fn(() =>
+			Promise.resolve(
+				Response.json([
+					{ date: "2026-09-03", base: "USD", quote: "CNY", rate: 6.7189 },
+				]),
+			),
+		);
+		await expect(
+			refreshExchangeRates(db, request, now, {
+				category: "fiat",
+				configuration: {
+					enabled: true,
+					provider: "exchangerate_host",
+					intervalMs: 21_600_000,
+					adjustmentBps: -100,
+					credentials: { apiKey: "" },
+					lastSyncedAt: null,
+				},
+			}),
+		).resolves.toMatchObject({ configured: 1, updated: 1, failed: 0 });
+		await expect(
+			db
+				.prepare(
+					"SELECT raw_rate,rate,source,adjustment_bps,observed_at,expires_at FROM exchange_rates WHERE base='USD' AND quote='CNY'",
+				)
+				.first(),
+		).resolves.toEqual({
+			raw_rate: "6.7189",
+			rate: "6.651711",
+			source: "frankfurter",
+			adjustment_bps: -100,
+			observed_at: now,
+			expires_at: now + 24 * 60 * 60_000,
+		});
+		await saveRateSyncConfiguration(
+			db,
+			"fiat",
+			{
+				enabled: true,
+				provider: "exchangerate_host",
+				intervalMs: 86_400_000,
+				adjustmentBps: 0,
+				credentials: { apiKey: "" },
+				lastSyncedAt: null,
+			},
+			null,
+			now + 1,
+		);
 	});
 
 	it("persists every valid fiat quote returned by the provider", async () => {

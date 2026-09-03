@@ -37,6 +37,13 @@ const fiatRatesSchema = z.looseObject({
 		})
 		.optional(),
 });
+const frankfurterRatesSchema = z.array(
+	z.object({
+		base: z.string().length(3),
+		quote: z.string().length(3),
+		rate: z.number().positive(),
+	}),
+);
 
 class ExchangeRateProviderError extends Error {
 	readonly failureCode: `http_${number}` | "provider_error";
@@ -296,7 +303,6 @@ export async function refreshRateCategoryIfDue(
 		(await loadRateSyncConfiguration(db, "fiat"));
 	if (
 		!fiatConfiguration.enabled ||
-		!fiatConfiguration.credentials.apiKey ||
 		(fiatConfiguration.lastSyncedAt !== null &&
 			now - fiatConfiguration.lastSyncedAt < fiatConfiguration.intervalMs)
 	)
@@ -359,7 +365,7 @@ export async function refreshExchangeRates(
 	const allFailures: Array<{
 		id: string;
 		pair: string;
-		source: "binance" | "okx" | "exchangerate_host";
+		source: "binance" | "okx" | "exchangerate_host" | "frankfurter";
 		code: string;
 	}> = [];
 	if (category === "crypto") {
@@ -429,26 +435,27 @@ export async function refreshExchangeRates(
 			);
 		}
 	} else {
+		const apiKey =
+			context.apiKey ?? fiatConfiguration?.credentials.apiKey ?? null;
+		const fiatSource = apiKey ? "exchangerate_host" : "frankfurter";
 		try {
-			const apiKey =
-				context.apiKey ?? fiatConfiguration?.credentials.apiKey ?? null;
-			if (!apiKey)
-				throw new Error("exchangerate_host API Key is not configured");
 			const rates = await observeProviderOperation(
 				{
-					adapter: "exchangerate_host",
+					adapter: fiatSource,
 					operation: "sync_fiat_rates",
 					classifyError: classifyExchangeRateError,
 				},
 				(counters) => {
 					counters.request();
-					return fetchFiatRates(
-						"USD",
-						[],
-						request,
-						"https://api.exchangerate.host",
-						apiKey,
-					);
+					return apiKey
+						? fetchFiatRates(
+								"USD",
+								[],
+								request,
+								"https://api.exchangerate.host",
+								apiKey,
+							)
+						: fetchFrankfurterRates("USD", [], request);
 				},
 			);
 			const snapshots = Object.entries(rates)
@@ -461,7 +468,7 @@ export async function refreshExchangeRates(
 							`INSERT INTO exchange_rates
 							 (id, category, base, quote, raw_rate, rate, source, adjustment_bps,
 							  observed_at, expires_at, created_at, updated_at)
-							 VALUES (?, 'fiat', 'USD', ?, ?, ?, 'exchangerate_host', ?, ?, ?, ?, ?)
+							 VALUES (?, 'fiat', 'USD', ?, ?, ?, ?, ?, ?, ?, ?, ?)
 							 ON CONFLICT(category, base, quote) DO UPDATE SET
 							 raw_rate = excluded.raw_rate, rate = excluded.rate,
 							 source = excluded.source, adjustment_bps = excluded.adjustment_bps,
@@ -476,6 +483,7 @@ export async function refreshExchangeRates(
 								snapshot.rawRate,
 								fiatConfiguration?.adjustmentBps ?? 0,
 							),
+							fiatSource,
 							fiatConfiguration?.adjustmentBps ?? 0,
 							now,
 							now + 24 * 60 * 60_000,
@@ -493,7 +501,7 @@ export async function refreshExchangeRates(
 			allFailures.push({
 				id: "fiat",
 				pair: "USD/fiat",
-				source: "exchangerate_host",
+				source: fiatSource,
 				code: exchangeRateErrorCode(error),
 			});
 		}
@@ -666,6 +674,45 @@ export async function fetchFiatRates(
 			]);
 	return Object.fromEntries(
 		entries.map(([quote, rate]) => [quote.toUpperCase(), String(rate)]),
+	);
+}
+
+export async function fetchFrankfurterRates(
+	base: string,
+	symbols: string[],
+	request: (input: string, init?: RequestInit) => Promise<Response> = fetch as (
+		input: string,
+		init?: RequestInit,
+	) => Promise<Response>,
+	apiUrl = "https://api.frankfurter.dev/v2",
+) {
+	const normalizedBase = base.toUpperCase();
+	const params = new URLSearchParams({ base: normalizedBase });
+	if (symbols.length > 0)
+		params.set(
+			"quotes",
+			symbols.map((symbol) => symbol.toUpperCase()).join(","),
+		);
+	const response = await request(
+		`${apiUrl.replace(/\/$/, "")}/rates?${params}`,
+		{
+			headers: {
+				accept: "application/json",
+				"user-agent": "GMPay-Edge/1.0",
+			},
+			signal: AbortSignal.timeout(8_000),
+		},
+	);
+	if (!response.ok)
+		throw new ExchangeRateProviderError(
+			`Frankfurter returned HTTP ${response.status}`,
+			response.status,
+		);
+	const rows = frankfurterRatesSchema.parse(await response.json());
+	return Object.fromEntries(
+		rows
+			.filter((row) => row.base.toUpperCase() === normalizedBase)
+			.map((row) => [row.quote.toUpperCase(), String(row.rate)]),
 	);
 }
 
