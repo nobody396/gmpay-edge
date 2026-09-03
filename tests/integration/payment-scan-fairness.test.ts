@@ -130,10 +130,11 @@ describe("payment scan scheduling fairness", () => {
 		await db.prepare("DELETE FROM payment_ingresses").run();
 	});
 
-	it("advances provider cursors monotonically and preserves empty scans", async () => {
+	it("advances provider cursors monotonically, including empty scans", async () => {
 		await expect(
 			advancePaymentScanCursor(db, "order-a", []),
 		).resolves.toBeNull();
+		await advancePaymentScanCursor(db, "order-a", [], 99n);
 		await advancePaymentScanCursor(db, "order-a", [{ blockNumber: 100n }]);
 		await advancePaymentScanCursor(db, "order-a", [{ blockNumber: 90n }]);
 		await advancePaymentScanCursor(db, "order-a", [

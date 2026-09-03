@@ -84,6 +84,7 @@ export async function handlePaymentScan(
 	for (const [index, candidate] of candidates.entries()) {
 		const startedAt = performance.now();
 		let transactions: NormalizedTransaction[];
+		let scanCursor: bigint | undefined;
 		try {
 			transactions = await scanTransactions(
 				env.DB,
@@ -91,6 +92,9 @@ export async function handlePaymentScan(
 				payment.asset_code,
 				candidate.adapter,
 				candidate.subscription,
+				(cursor) => {
+					scanCursor = cursor;
+				},
 			);
 			if (isObservedProviderAdapter(candidate.adapter.id))
 				recordProviderOperation({
@@ -144,7 +148,12 @@ export async function handlePaymentScan(
 			transactions,
 			runtime,
 		);
-		await advancePaymentScanCursor(env.DB, message.body.orderId, transactions);
+		await advancePaymentScanCursor(
+			env.DB,
+			message.body.orderId,
+			transactions,
+			scanCursor,
+		);
 		message.ack();
 		return;
 	}
@@ -165,6 +174,7 @@ export async function scanTransactions(
 		connectionId: string;
 		adapter: PaymentAdapter<unknown>;
 	},
+	onCursor?: (cursor: bigint) => void,
 ) {
 	const pushed: NormalizedTransaction[] = [];
 	const subscriptionAdapter = subscription?.adapter ?? adapter;
@@ -201,7 +211,7 @@ export async function scanTransactions(
 			});
 	}
 	try {
-		const discovered = message.providerOrderId
+		const scanResult = message.providerOrderId
 			? [
 					await adapter.getTransaction(message.providerOrderId, {
 						address: message.address,
@@ -211,13 +221,25 @@ export async function scanTransactions(
 					(transaction): transaction is NonNullable<typeof transaction> =>
 						transaction !== null,
 				)
-			: await adapter.findTransactions({
-					address: message.address,
-					assetCode,
-					...(message.sinceBlock
-						? { sinceBlock: BigInt(message.sinceBlock) }
-						: {}),
-				});
+			: adapter.findTransactionsWithCursor
+				? await adapter.findTransactionsWithCursor({
+						address: message.address,
+						assetCode,
+						...(message.sinceBlock
+							? { sinceBlock: BigInt(message.sinceBlock) }
+							: {}),
+					})
+				: await adapter.findTransactions({
+						address: message.address,
+						assetCode,
+						...(message.sinceBlock
+							? { sinceBlock: BigInt(message.sinceBlock) }
+							: {}),
+					});
+		const discovered = Array.isArray(scanResult)
+			? scanResult
+			: scanResult.transactions;
+		if (!Array.isArray(scanResult)) onCursor?.(scanResult.cursor);
 		const pending = await refreshPendingPaymentTransactions(
 			db,
 			message.orderId,
@@ -346,12 +368,13 @@ export async function advancePaymentScanCursor(
 	db: D1Database,
 	orderId: string,
 	transactions: Array<{ blockNumber: bigint }>,
+	scanCursor?: bigint,
 ) {
-	if (!transactions.length) return null;
+	if (!transactions.length && scanCursor == null) return null;
 	const cursor = transactions.reduce(
 		(maximum, transaction) =>
 			transaction.blockNumber > maximum ? transaction.blockNumber : maximum,
-		0n,
+		scanCursor ?? 0n,
 	);
 	await db
 		.prepare(

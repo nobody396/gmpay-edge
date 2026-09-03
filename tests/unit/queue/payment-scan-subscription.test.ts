@@ -2,6 +2,28 @@ import { describe, expect, it, vi } from "vitest";
 import { scanTransactions } from "#/server/queue/payment-scan";
 
 describe("payment scan WSS consumption", () => {
+	it("reports an EVM scan boundary even when no transfer was found", async () => {
+		const onCursor = vi.fn();
+		const adapter = {
+			findTransactionsWithCursor: vi
+				.fn()
+				.mockResolvedValue({ transactions: [], cursor: 120n }),
+			getTransaction: vi.fn(),
+		};
+
+		await expect(
+			scanTransactions(
+				emptyPaymentsDb(),
+				message("0x1111111111111111111111111111111111111111"),
+				"USDT",
+				adapter as never,
+				undefined,
+				onCursor,
+			),
+		).resolves.toEqual([]);
+		expect(onCursor).toHaveBeenCalledWith(120n);
+	});
+
 	it("merges bounded subscription events with the polling result", async () => {
 		const transaction = {
 			network: "ethereum" as const,

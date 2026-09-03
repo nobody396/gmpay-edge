@@ -14,6 +14,7 @@ import type {
 	PaymentAdapter,
 	PaymentTarget,
 	TransactionLookup,
+	TransactionScanResult,
 } from "./types";
 
 const evmNetworks = ["ethereum", "base", "bsc", "polygon"] as const;
@@ -195,6 +196,13 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 		assetCode: string;
 		sinceBlock?: bigint;
 	}) {
+		return (await this.findTransactionsWithCursor(input)).transactions;
+	}
+	async findTransactionsWithCursor(input: {
+		address: string;
+		assetCode: string;
+		sinceBlock?: bigint;
+	}): Promise<TransactionScanResult> {
 		if (!this.validateAddress(input.address))
 			throw new Error("Invalid EVM address");
 		return observeProviderOperation(
@@ -224,33 +232,39 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 				counters,
 			),
 		);
+		if (input.sinceBlock != null && input.sinceBlock > BigInt(latest))
+			return { transactions: [], cursor: BigInt(latest) };
 		const earliest = Math.max(0, latest - this.config.blockLookback + 1);
-		if (input.sinceBlock != null) {
-			if (input.sinceBlock > BigInt(latest)) return [];
-			if (input.sinceBlock < BigInt(earliest))
-				throw new Error("EVM scan exceeds the configured block lookback");
-		}
 		const from = input.sinceBlock == null ? earliest : Number(input.sinceBlock);
+		const to = Math.min(latest, from + this.config.blockLookback - 1);
 		const token = this.token(input.assetCode);
 		if (token)
-			return this.findTokenTransfers(
+			return {
+				transactions: await this.findTokenTransfers(
+					input.address,
+					input.assetCode,
+					token.address,
+					from,
+					to,
+					latest,
+					deadlineAt,
+					counters,
+				),
+				cursor: BigInt(to),
+			};
+		if (input.assetCode.toUpperCase() !== this.config.nativeAsset.toUpperCase())
+			return { transactions: [], cursor: BigInt(to) };
+		return {
+			transactions: await this.findNativeTransfers(
 				input.address,
-				input.assetCode,
-				token.address,
 				from,
+				to,
 				latest,
 				deadlineAt,
 				counters,
-			);
-		if (input.assetCode.toUpperCase() !== this.config.nativeAsset.toUpperCase())
-			return [];
-		return this.findNativeTransfers(
-			input.address,
-			from,
-			latest,
-			deadlineAt,
-			counters,
-		);
+			),
+			cursor: BigInt(to),
+		};
 	}
 	async getConfirmations(transaction: NormalizedTransaction) {
 		return observeProviderOperation(
@@ -436,6 +450,7 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 		assetCode: string,
 		contract: string,
 		from: number,
+		to: number,
 		latest: number,
 		deadlineAt: number,
 		counters: ProviderOperationCounters,
@@ -443,9 +458,9 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 		const rows: z.infer<typeof logSchema>[] = [];
 		let rangeStart = from;
 		let blockRange = this.config.logBlockRange;
-		while (rangeStart <= latest) {
+		while (rangeStart <= to) {
 			counters.page();
-			const rangeEnd = Math.min(latest, rangeStart + blockRange - 1);
+			const rangeEnd = Math.min(to, rangeStart + blockRange - 1);
 			let rawBatch: unknown;
 			try {
 				rawBatch = await this.rpc(
@@ -502,13 +517,14 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 	private async findNativeTransfers(
 		address: string,
 		from: number,
+		to: number,
 		latest: number,
 		deadlineAt: number,
 		counters: ProviderOperationCounters,
 	) {
 		const normalized: NormalizedTransaction[] = [];
 		let matches = 0;
-		for (let number = from; number <= latest; number += 1) {
+		for (let number = from; number <= to; number += 1) {
 			counters.page();
 			const block = blockSchema.parse(
 				await this.rpc(

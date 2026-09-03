@@ -44,6 +44,10 @@ export interface TransactionLookup {
 	assetCode?: string;
 	eventIndex?: number;
 }
+export interface TransactionScanResult {
+	transactions: NormalizedTransaction[];
+	cursor: bigint;
+}
 export type AdapterErrorKind =
 	| "configuration"
 	| "authentication"
@@ -70,6 +74,11 @@ export interface PaymentAdapter<TConfig> {
 		assetCode: string;
 		sinceBlock?: bigint;
 	}): Promise<NormalizedTransaction[]>;
+	findTransactionsWithCursor?(input: {
+		address: string;
+		assetCode: string;
+		sinceBlock?: bigint;
+	}): Promise<TransactionScanResult>;
 	/**
 	 * Optional bounded push path. Adapters expose this only when the provider
 	 * supports a real subscription transport; polling remains the fallback.
