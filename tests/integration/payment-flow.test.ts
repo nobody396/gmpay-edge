@@ -109,6 +109,44 @@ describe("D1 payment processing flow", () => {
 		});
 	});
 
+	it("does not re-emit paid webhooks or overwrite paid_at as confirmations grow", async () => {
+		const now = Date.now();
+		const target = "TPaidStable111111111111111111111111";
+		await insertOrderWithSnapshot(db, {
+			id: "order-paid-stable",
+			externalOrderId: "merchant-order-paid-stable",
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			now,
+		});
+		await expect(
+			recordPaymentTransaction(
+				env,
+				"order-paid-stable",
+				transaction({ hash: "tx-paid-stable", to: target, confirmations: 2 }),
+			),
+		).resolves.toEqual({ duplicate: false, status: "paid" });
+		await db
+			.prepare("UPDATE orders SET paid_at = 123 WHERE id = 'order-paid-stable'")
+			.run();
+		await expect(
+			recordPaymentTransaction(
+				env,
+				"order-paid-stable",
+				transaction({ hash: "tx-paid-stable", to: target, confirmations: 3 }),
+			),
+		).resolves.toEqual({ duplicate: false, status: "paid" });
+		const state = await db
+			.prepare(
+				`SELECT paid_at,
+				 (SELECT COUNT(*) FROM webhook_events WHERE order_id = o.id AND type = 'order.paid') AS paid_events
+				 FROM orders o WHERE o.id = 'order-paid-stable'`,
+			)
+			.first<{ paid_at: number; paid_events: number }>();
+		expect(state).toEqual({ paid_at: 123, paid_events: 1 });
+	});
+
 	it("does not retry dashboard queries after its single batch fails", async () => {
 		const counters = createDatastoreCounters();
 		const unavailable = new Proxy(db, {

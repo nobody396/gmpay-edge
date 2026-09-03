@@ -32,7 +32,7 @@ export async function recordPaymentTransaction(
 ): Promise<{ duplicate: boolean; status: OrderStatus }> {
 	const storedOrder = await env.DB.prepare(
 		`SELECT o.id, o.external_order_id, o.status, o.amount_minor,
-		 o.currency, o.currency_decimals, o.received_amount_units, o.expires_at, o.version,
+		 o.currency, o.currency_decimals, o.received_amount_units, o.expires_at, o.paid_at, o.version,
 		 ops.expected_amount_units, ops.asset_code AS code, ops.rail_code AS network, ops.decimals,
 		 ops.target_value AS address, ops.required_confirmations
 		 FROM orders o
@@ -48,6 +48,7 @@ export async function recordPaymentTransaction(
 				currency: string;
 				received_amount_units: string;
 				expires_at: number;
+				paid_at: number | null;
 				version: number;
 				code: string;
 				network: string;
@@ -195,6 +196,7 @@ export async function recordPaymentTransaction(
 	);
 
 	const now = Date.now();
+	const statusChanged = order.status !== aggregate.status;
 	const eventId = crypto.randomUUID();
 	const eventType = `order.${aggregate.status}` as OrderWebhookPayload["event"];
 	const payload = {
@@ -221,7 +223,9 @@ export async function recordPaymentTransaction(
 			blockNumber: transaction.blockNumber.toString(),
 		},
 	};
-	const selected = await matchingWebhookEndpoints(env.DB, orderId);
+	const selected = statusChanged
+		? await matchingWebhookEndpoints(env.DB, orderId)
+		: [];
 	const deliveries = selected.map((endpoint) => ({
 		id: crypto.randomUUID(),
 		endpoint,
@@ -285,7 +289,9 @@ export async function recordPaymentTransaction(
 			aggregate.status,
 			aggregate.receivedUnits.toString(),
 			aggregate.status === "paid" || aggregate.status === "overpaid"
-				? now
+				? order.status === "paid" || order.status === "overpaid"
+					? (order.paid_at ?? now)
+					: now
 				: null,
 			now,
 			orderId,
@@ -307,17 +313,21 @@ export async function recordPaymentTransaction(
 					).bind(now, orderId, orderId, order.version + 1),
 				]
 			: []),
-		env.DB.prepare(
-			"INSERT INTO webhook_events (id, order_id, type, deduplication_key, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		).bind(
-			eventId,
-			orderId,
-			eventType,
-			`${orderId}:${transactionId}:${aggregate.status}:${transaction.confirmations}:${transaction.blockHash}`,
-			JSON.stringify(payload),
-			now,
-			now,
-		),
+		...(statusChanged
+			? [
+					env.DB.prepare(
+						"INSERT INTO webhook_events (id, order_id, type, deduplication_key, payload, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+					).bind(
+						eventId,
+						orderId,
+						eventType,
+						`${orderId}:${transactionId}:${aggregate.status}:${transaction.confirmations}:${transaction.blockHash}`,
+						JSON.stringify(payload),
+						now,
+						now,
+					),
+				]
+			: []),
 		...deliveries.map(({ id, endpoint }) =>
 			env.DB.prepare(
 				"INSERT INTO webhook_deliveries (id, event_id, order_id, api_key_id, status, attempt_count, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', 0, ?, ?)",
@@ -366,12 +376,13 @@ export async function recordPaymentTransaction(
 		return { duplicate: true, status: attributed.order_status };
 	}
 
-	await dispatchPaymentNotifications(
-		env,
-		eventId,
-		payload,
-		deliveries,
-		eventType,
-	);
+	if (statusChanged)
+		await dispatchPaymentNotifications(
+			env,
+			eventId,
+			payload,
+			deliveries,
+			eventType,
+		);
 	return { duplicate: false, status: aggregate.status };
 }

@@ -3,7 +3,7 @@
 	"name": "gmpay-edge",
 	"main": "src/server-entry.ts",
 	"compatibility_date": "2026-07-01",
-	"compatibility_flags": ["nodejs_compat"],
+	"compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
 	"placement": { "mode": "smart" },
 	"observability": { "enabled": true },
 	"cache": { "enabled": true },

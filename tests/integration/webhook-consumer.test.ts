@@ -536,11 +536,12 @@ describe("Webhook queue consumer on D1", () => {
 		});
 		const attempt = await db
 			.prepare(
-				"SELECT request_snapshot FROM webhook_attempts WHERE delivery_id = ?",
+				"SELECT request_snapshot, error_code FROM webhook_attempts WHERE delivery_id = ?",
 			)
 			.bind("delivery-unsafe")
-			.first<{ request_snapshot: string | null }>();
+			.first<{ request_snapshot: string | null; error_code: string }>();
 		expect(attempt?.request_snapshot).toBeNull();
+		expect(attempt?.error_code).toBe("unsafe_webhook_destination");
 	});
 });
 

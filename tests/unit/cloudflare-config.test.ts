@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 type WranglerConfig = {
 	main?: string;
 	no_bundle?: boolean;
+	compatibility_flags?: string[];
 	d1_databases?: Array<{
 		binding?: string;
 		database_name?: string;
@@ -96,6 +97,9 @@ if (tool === "vite" && process.env.WORKERS_CI === "1") {
 		) as WranglerConfig;
 
 		expect(config.main).toBe("src/server-entry.ts");
+		expect(config.compatibility_flags).toContain(
+			"global_fetch_strictly_public",
+		);
 		expect(config.d1_databases).toEqual([
 			{
 				binding: "DB",

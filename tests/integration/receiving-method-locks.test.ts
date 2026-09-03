@@ -92,6 +92,7 @@ describe("receiving method allocation and immutable snapshots", () => {
 
 	it("quotes a persisted adjusted exchange rate with exact decimal arithmetic", async () => {
 		expect(applyBasisPoints("1", 50)).toBe("1.005");
+		expect(applyBasisPoints("6.78025", -100)).toBe("6.7124475");
 		await expect(
 			quoteWithExchangeRate(db, {
 				amount: "100",

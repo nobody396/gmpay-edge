@@ -169,20 +169,13 @@ describe("checkout receiving method selection", () => {
 		});
 	});
 
-	it("keeps payment options available with the latest expired exchange rate", async () => {
+	it("fails closed instead of quoting with an expired exchange rate", async () => {
 		await expect(
 			listCheckoutPaymentOptions(db, cnyOrderId),
 		).resolves.toMatchObject({
 			selectable: true,
-			options: expect.arrayContaining([
-				expect.objectContaining({
-					paymentMethodId: "asset-usdt-tron",
-					asset: "USDT",
-					network: "tron",
-					amount: "0.147488",
-				}),
-			]),
-			unavailableReason: null,
+			options: [],
+			unavailableReason: "rate_unavailable",
 		});
 	});
 

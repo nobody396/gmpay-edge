@@ -107,11 +107,20 @@ export async function processWebhookMessage(
 		)
 			throw new Error("Webhook delivery hostname did not resolve publicly");
 		result = await deliverWebhook(delivery, fetcher, settings.webhookTimeoutMs);
-	} catch {
+	} catch (error) {
+		const errorCode = webhookPreparationErrorCode(error);
+		console.warn(
+			JSON.stringify({
+				event: "webhook_delivery_preparation_failed",
+				deliveryId: message.body.deliveryId,
+				eventId: message.body.eventId,
+				errorCode,
+			}),
+		);
 		result = {
 			success: false as const,
 			durationMs: Date.now() - startedAt,
-			errorCode: "configuration_error",
+			errorCode,
 		};
 	}
 	const now = Date.now();
@@ -190,6 +199,31 @@ export async function processWebhookMessage(
 	}
 	message.ack();
 	return result;
+}
+
+function webhookPreparationErrorCode(error: unknown) {
+	const message = error instanceof Error ? error.message : "";
+	if (message.includes("DNS resolution failed"))
+		return "webhook_dns_resolution_failed";
+	if (
+		message.includes("did not resolve publicly") ||
+		message.includes("not a public HTTPS endpoint")
+	)
+		return "unsafe_webhook_destination";
+	if (message.includes("signing secret is unavailable"))
+		return "webhook_signing_secret_unavailable";
+	if (
+		message.includes("configuration not found") ||
+		message.includes("protocol is unavailable")
+	)
+		return "webhook_configuration_missing";
+	if (
+		error instanceof DOMException ||
+		message.includes("encrypted secret") ||
+		message.includes("decrypt")
+	)
+		return "webhook_secret_decryption_failed";
+	return "invalid_webhook_configuration";
 }
 
 export function redactResponseExcerpt(value: string | undefined) {
