@@ -1,7 +1,10 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { handleQueue } from "#/server/queue";
-import { queueMessageKind } from "#/server/queue/routing";
+import {
+	createMerchantWebhookFetcher,
+	queueMessageKind,
+} from "#/server/queue/routing";
 import { applyMigrations } from "./migrations";
 
 describe("Cloudflare Queue envelope rejection", () => {
@@ -392,5 +395,51 @@ describe("Cloudflare Queue envelope rejection", () => {
 			health_status: "unhealthy",
 			last_error_code: "configuration",
 		});
+	});
+});
+
+describe("merchant webhook routing", () => {
+	it.each([
+		"https://laoshirenvip.com/api/shop/payments/provider/webhook",
+		"https://gmshop-edge.laoshirenai.workers.dev/api/shop/payments/provider/webhook",
+	])("routes the owned GMShop callback through its service binding", async (url) => {
+		const publicFetch = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(new Response("public"));
+		const gmshopFetch = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(new Response("ok"));
+		const fetcher = createMerchantWebhookFetcher(
+			{ fetch: gmshopFetch } as unknown as Fetcher,
+			publicFetch,
+		);
+
+		const response = await fetcher(url, { method: "POST", body: "{}" });
+
+		expect(await response.text()).toBe("ok");
+		expect(gmshopFetch).toHaveBeenCalledOnce();
+		expect(publicFetch).not.toHaveBeenCalled();
+		const [request] = gmshopFetch.mock.calls[0] ?? [];
+		expect(request).toBeInstanceOf(Request);
+		expect((request as Request).url).toBe(url);
+	});
+
+	it("keeps unrelated merchant callbacks on public fetch", async () => {
+		const publicFetch = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(new Response("external"));
+		const gmshopFetch = vi
+			.fn<typeof fetch>()
+			.mockResolvedValue(new Response("wrong"));
+		const fetcher = createMerchantWebhookFetcher(
+			{ fetch: gmshopFetch } as unknown as Fetcher,
+			publicFetch,
+		);
+
+		const response = await fetcher("https://merchant.example/webhook");
+
+		expect(await response.text()).toBe("external");
+		expect(publicFetch).toHaveBeenCalledOnce();
+		expect(gmshopFetch).not.toHaveBeenCalled();
 	});
 });

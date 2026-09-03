@@ -9,6 +9,7 @@ import type {
 } from "#/features/payments/types";
 import { processWebhookMessage } from "#/features/webhooks/server/consumer";
 import type { WebhookQueueMessage } from "#/features/webhooks/types";
+import { resolveWebhookHostname } from "#/lib/webhook-url";
 import { loadOperationalSettings } from "#/server/operational-settings";
 import { handlePaymentMaintenance } from "#/server/queue/payment-maintenance";
 import { handlePaymentProviderEvent } from "#/server/queue/payment-provider-event";
@@ -202,10 +203,18 @@ async function processQueueMessage(
 			context.settings,
 			context.runtime,
 		]);
-		return processWebhookMessage(env.DB, message, fetch, env.WEBHOOK_QUEUE, {
-			...(settings ? { settings } : {}),
-			...(runtime ? { runtime } : {}),
-		});
+		return processWebhookMessage(
+			env.DB,
+			message,
+			createMerchantWebhookFetcher(env.GMSHOP),
+			env.WEBHOOK_QUEUE,
+			{
+				...(settings ? { settings } : {}),
+				...(runtime ? { runtime } : {}),
+				resolveHostname: resolveWebhookHostname,
+				trustedServiceBindingHosts: gmshopWebhookHosts,
+			},
+		);
 	}
 	if (isPaymentScanQueueMessage(message))
 		return handlePaymentScan(
@@ -218,6 +227,23 @@ async function processQueueMessage(
 		return handlePaymentProviderEvent(message, env, await context.runtime);
 	if (isPaymentMaintenanceQueueMessage(message))
 		return handlePaymentMaintenance(message, env, await context.runtime);
+}
+
+const gmshopWebhookHosts = new Set([
+	"laoshirenvip.com",
+	"gmshop-edge.laoshirenai.workers.dev",
+]);
+
+export function createMerchantWebhookFetcher(
+	gmshop: Fetcher | undefined,
+	publicFetch: typeof fetch = fetch,
+): typeof fetch {
+	return async (input, init) => {
+		const request = new Request(input, init);
+		if (gmshop && gmshopWebhookHosts.has(new URL(request.url).hostname))
+			return gmshop.fetch(request);
+		return publicFetch(input, init);
+	};
 }
 
 function queueExpectedMessageKind(queue: string) {

@@ -14,6 +14,7 @@ import { minorToDecimal } from "#/lib/units";
 import {
 	assertSafeResolvedWebhookUrl,
 	isSafeWebhookUrl,
+	resolveWebhookHostname,
 	type WebhookHostnameResolver,
 } from "#/lib/webhook-url";
 import { redactAuditValue } from "#/server/audit-redaction";
@@ -37,6 +38,7 @@ export async function processWebhookMessage(
 		settings?: Awaited<ReturnType<typeof loadOperationalSettings>>;
 		runtime?: RuntimeConfig;
 		resolveHostname?: WebhookHostnameResolver;
+		trustedServiceBindingHosts?: ReadonlySet<string>;
 	} = {},
 ) {
 	const settings = context.settings ?? (await loadOperationalSettings(db));
@@ -97,13 +99,13 @@ export async function processWebhookMessage(
 			message.body,
 			context.runtime,
 		);
-		// Production relies on the required global_fetch_strictly_public Worker
-		// flag to route webhook fetches through Cloudflare's public front door.
-		// An extra DoH lookup here makes delivery depend on a second Cloudflare
-		// subrequest and can fail before the merchant endpoint is ever called.
-		const resolveHostname = context.resolveHostname;
+		const hostname = new URL(delivery.url).hostname.toLowerCase();
+		const resolveHostname =
+			context.resolveHostname ??
+			(fetcher === fetch ? resolveWebhookHostname : undefined);
 		if (
 			resolveHostname &&
+			!context.trustedServiceBindingHosts?.has(hostname) &&
 			!(await assertSafeResolvedWebhookUrl(delivery.url, resolveHostname))
 		)
 			throw new Error("Webhook delivery hostname did not resolve publicly");

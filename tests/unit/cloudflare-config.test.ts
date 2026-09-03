@@ -15,6 +15,7 @@ type WranglerConfig = {
 	main?: string;
 	no_bundle?: boolean;
 	compatibility_flags?: string[];
+	services?: Array<{ binding?: string; service?: string }>;
 	d1_databases?: Array<{
 		binding?: string;
 		database_name?: string;
@@ -97,9 +98,12 @@ if (tool === "vite" && process.env.WORKERS_CI === "1") {
 		) as WranglerConfig;
 
 		expect(config.main).toBe("src/server-entry.ts");
-		expect(config.compatibility_flags).toContain(
+		expect(config.compatibility_flags).not.toContain(
 			"global_fetch_strictly_public",
 		);
+		expect(config.services).toEqual([
+			{ binding: "GMSHOP", service: "gmshop-edge" },
+		]);
 		expect(config.d1_databases).toEqual([
 			{
 				binding: "DB",
