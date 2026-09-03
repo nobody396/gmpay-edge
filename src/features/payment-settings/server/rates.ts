@@ -56,7 +56,7 @@ export async function quoteWithExchangeRate(
 			  OR (? IN ('USD', 'USDT', 'USDC') AND
 			   ((base IN ('USD', 'USDT', 'USDC') AND quote = ?)
 			    OR (base = ? AND quote IN ('USD', 'USDT', 'USDC'))))
-			 ) AND (expires_at > ? OR (source = 'manual' AND expires_at = 0))
+			 )
 			 ORDER BY CASE WHEN base = ? OR quote = ? THEN 0 ELSE 1 END,
 			 observed_at DESC LIMIT 1`,
 		)
@@ -68,7 +68,6 @@ export async function quoteWithExchangeRate(
 			input.paymentAsset,
 			input.currency,
 			input.currency,
-			now,
 			input.paymentAsset,
 			input.paymentAsset,
 		)
