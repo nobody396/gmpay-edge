@@ -16,9 +16,11 @@ export function formatRemaining(totalSeconds: number) {
 
 export function CopyIconButton({
 	className,
+	label,
 	onClick,
 }: {
 	className?: string;
+	label?: string;
 	onClick: () => boolean | undefined | Promise<boolean | undefined>;
 }) {
 	const [copied, setCopied] = useState(false);
@@ -52,10 +54,10 @@ export function CopyIconButton({
 
 	return (
 		<Button
-			aria-label={copied ? m.common_copy_success() : m.common_copy()}
+			aria-label={copied ? m.common_copy_success() : (label ?? m.common_copy())}
 			className={cn("mb-0.5 shrink-0", className)}
 			onClick={handleClick}
-			size="icon-sm"
+			size={label ? "default" : "icon-sm"}
 			type="button"
 			variant="secondary"
 		>
@@ -64,6 +66,7 @@ export function CopyIconButton({
 			) : (
 				<Copy />
 			)}
+			{label ? (copied ? m.common_copy_success() : label) : null}
 		</Button>
 	);
 }

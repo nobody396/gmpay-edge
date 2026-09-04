@@ -9,6 +9,7 @@ import {
 	type CheckoutOrder,
 	safeCheckoutReturnUrl,
 } from "#/features/checkout/checkout-model";
+import { BscWithdrawalNotice } from "#/features/checkout/components/bsc-withdrawal-notice";
 import { OrderSummaryCard } from "#/features/checkout/components/order-summary-card";
 import { PaymentDetailsPanel } from "#/features/checkout/components/payment-details-panel";
 import { PaymentReviewDialog } from "#/features/checkout/components/payment-review-dialog";
@@ -231,6 +232,7 @@ export function CheckoutPage({
 					order={order}
 					tradeId={orderId}
 				/>
+				<BscWithdrawalNotice onCopyAmount={copyText} order={order} />
 				<PaymentDetailsPanel
 					onCopyAddress={() => copyText(order.receive_address ?? "")}
 					onChangePaymentOption={() => setOptionDialogOpen(true)}
