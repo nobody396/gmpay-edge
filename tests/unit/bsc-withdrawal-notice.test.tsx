@@ -39,17 +39,24 @@ describe("BSC withdrawal notice", () => {
 		await act(async () => root?.render(element));
 	}
 
-	it("copies only the fee-inclusive input while displaying the unchanged receipt target", async () => {
+	it("offers separate wallet and exchange amounts while preserving the receipt target", async () => {
 		const onCopy = vi.fn().mockResolvedValue(true);
 		await render(<BscWithdrawalNotice onCopyAmount={onCopy} order={order} />);
 		expect(container?.textContent).toContain("59.8713 USDT");
 		expect(container?.textContent).toContain("59.8613 USDT");
 		expect(container?.textContent).toContain("0.01 USDT");
-		expect(container?.textContent).toContain("charged separately");
-		expect(container?.textContent).toContain("automatic payment confirmation");
-		await act(async () => container?.querySelector("button")?.click());
-		expect(onCopy).toHaveBeenCalledExactlyOnceWith("59.8713");
-		expect(container?.querySelector("button")?.textContent).toContain("Copied");
+		expect(container?.textContent).toContain("on-chain wallet");
+		expect(container?.textContent).toContain("Withdraw from an exchange");
+		expect(container?.textContent).toContain("automatic confirmation");
+		const buttons = container?.querySelectorAll("button");
+		expect(buttons).toHaveLength(2);
+		await act(async () => buttons?.[0]?.click());
+		expect(onCopy).toHaveBeenNthCalledWith(1, "59.8613");
+		await act(async () => buttons?.[1]?.click());
+		expect(onCopy).toHaveBeenNthCalledWith(2, "59.8713");
+		expect(onCopy).toHaveBeenCalledTimes(2);
+		expect(buttons?.[0]?.textContent).toContain("Copied");
+		expect(buttons?.[1]?.textContent).toContain("Copied");
 		expect(order.actual_amount).toBe("59.8613");
 	});
 
@@ -57,9 +64,9 @@ describe("BSC withdrawal notice", () => {
 		await render(
 			<BscWithdrawalNotice onCopyAmount={() => false} order={order} />,
 		);
-		await act(async () => container?.querySelector("button")?.click());
-		expect(container?.querySelector("button")?.textContent).toBe(
-			"Copy transfer amount",
+		await act(async () => container?.querySelectorAll("button")?.[1]?.click());
+		expect(container?.querySelectorAll("button")?.[1]?.textContent).toBe(
+			"Copy exchange amount",
 		);
 	});
 
@@ -79,7 +86,7 @@ describe("BSC withdrawal notice", () => {
 				order={{ ...order, actual_amount: "1.4950" }}
 			/>,
 		);
-		await act(async () => container?.querySelector("button")?.click());
+		await act(async () => container?.querySelectorAll("button")?.[1]?.click());
 		expect(onCopy).toHaveBeenCalledExactlyOnceWith("1.5050");
 	});
 

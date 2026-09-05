@@ -18,6 +18,7 @@ export function BscWithdrawalNotice({
 }) {
 	const transferAmount = bscWithdrawalAmount(order);
 	if (!transferAmount) return null;
+	const invoiceAmount = order.actual_amount ?? "";
 
 	return (
 		<section
@@ -28,21 +29,53 @@ export function BscWithdrawalNotice({
 				<Info aria-hidden="true" className="size-4 shrink-0" />
 				{m.checkout_bsc_withdrawal_title()}
 			</p>
-			<p className="text-sm">{m.checkout_bsc_withdrawal_amount_label()}</p>
-			<p className="mt-1 break-all font-bold font-mono text-2xl">
-				{transferAmount} USDT
+			<p className="text-sm leading-relaxed">
+				{m.checkout_bsc_withdrawal_intro()}
 			</p>
-			<CopyIconButton
-				className="mt-3 w-full"
-				key={transferAmount}
-				label={m.checkout_bsc_withdrawal_copy()}
-				onClick={() => onCopyAmount(transferAmount)}
-			/>
-			<p className="mt-3 text-sm leading-relaxed">
-				{m.checkout_bsc_withdrawal_assumption({ fee: BSC_WITHDRAWAL_FEE })}
-			</p>
+			<div className="mt-4 grid gap-3 sm:grid-cols-2">
+				<div className="rounded-xl border border-amber-300/80 bg-white/70 p-4 dark:border-amber-800 dark:bg-amber-950/20">
+					<p className="font-semibold text-sm">
+						{m.checkout_bsc_wallet_title()}
+					</p>
+					<p className="mt-1 min-h-10 text-xs leading-relaxed opacity-80">
+						{m.checkout_bsc_wallet_description()}
+					</p>
+					<p className="mt-3 text-xs">{m.checkout_bsc_wallet_amount_label()}</p>
+					<p className="mt-1 break-all font-bold font-mono text-xl">
+						{invoiceAmount} USDT
+					</p>
+					<CopyIconButton
+						className="mt-3 w-full"
+						key={`wallet-${invoiceAmount}`}
+						label={m.checkout_bsc_wallet_copy()}
+						onClick={() => onCopyAmount(invoiceAmount)}
+					/>
+				</div>
+				<div className="rounded-xl border border-amber-300/80 bg-white/70 p-4 dark:border-amber-800 dark:bg-amber-950/20">
+					<p className="font-semibold text-sm">
+						{m.checkout_bsc_exchange_title()}
+					</p>
+					<p className="mt-1 min-h-10 text-xs leading-relaxed opacity-80">
+						{m.checkout_bsc_exchange_description({
+							fee: BSC_WITHDRAWAL_FEE,
+						})}
+					</p>
+					<p className="mt-3 text-xs">
+						{m.checkout_bsc_exchange_amount_label()}
+					</p>
+					<p className="mt-1 break-all font-bold font-mono text-xl">
+						{transferAmount} USDT
+					</p>
+					<CopyIconButton
+						className="mt-3 w-full"
+						key={`exchange-${transferAmount}`}
+						label={m.checkout_bsc_exchange_copy()}
+						onClick={() => onCopyAmount(transferAmount)}
+					/>
+				</div>
+			</div>
 			<p className="mt-2 font-medium text-sm leading-relaxed">
-				{m.checkout_bsc_withdrawal_check({ amount: order.actual_amount ?? "" })}
+				{m.checkout_bsc_withdrawal_check({ amount: invoiceAmount })}
 			</p>
 		</section>
 	);
