@@ -81,6 +81,7 @@ export async function handlePaymentScan(
 		return;
 	}
 	let failoverCount = 0;
+	let emptyScanCursor: bigint | undefined;
 	for (const [index, candidate] of candidates.entries()) {
 		const startedAt = performance.now();
 		let transactions: NormalizedTransaction[];
@@ -142,17 +143,47 @@ export async function handlePaymentScan(
 				"healthy",
 				null,
 			);
+		if (!transactions.length) {
+			if (scanCursor == null) {
+				message.ack();
+				return;
+			}
+			emptyScanCursor =
+				emptyScanCursor == null || scanCursor < emptyScanCursor
+					? scanCursor
+					: emptyScanCursor;
+			if (index < candidates.length - 1) {
+				failoverCount += 1;
+			}
+			continue;
+		}
 		await processScannedTransactions(
 			env,
 			message.body.orderId,
 			transactions,
 			runtime,
 		);
+		let persistedCursor = scanCursor;
+		if (
+			emptyScanCursor != null &&
+			(persistedCursor == null || emptyScanCursor < persistedCursor)
+		)
+			persistedCursor = emptyScanCursor;
 		await advancePaymentScanCursor(
 			env.DB,
 			message.body.orderId,
 			transactions,
-			scanCursor,
+			persistedCursor,
+		);
+		message.ack();
+		return;
+	}
+	if (emptyScanCursor != null) {
+		await advancePaymentScanCursor(
+			env.DB,
+			message.body.orderId,
+			[],
+			emptyScanCursor,
 		);
 		message.ack();
 		return;
@@ -371,11 +402,13 @@ export async function advancePaymentScanCursor(
 	scanCursor?: bigint,
 ) {
 	if (!transactions.length && scanCursor == null) return null;
-	const cursor = transactions.reduce(
-		(maximum, transaction) =>
-			transaction.blockNumber > maximum ? transaction.blockNumber : maximum,
-		scanCursor ?? 0n,
-	);
+	const cursor =
+		scanCursor ??
+		transactions.reduce(
+			(maximum, transaction) =>
+				transaction.blockNumber > maximum ? transaction.blockNumber : maximum,
+			0n,
+		);
 	await db
 		.prepare(
 			`UPDATE orders SET payment_scan_cursor = CASE

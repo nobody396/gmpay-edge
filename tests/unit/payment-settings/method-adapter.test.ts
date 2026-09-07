@@ -95,6 +95,22 @@ describe("payment method adapter routing", () => {
 		});
 	});
 
+	it("adds a delayed and overlapping scan window to BSC adapters", async () => {
+		const [candidate] = await createPaymentMethodAdapters(
+			db([chainRow("bsc", "evm", "BNB")]),
+			"method-bsc",
+		);
+		if (!candidate) throw new Error("Missing BSC adapter");
+
+		expect(
+			(candidate.adapter as unknown as { config: Record<string, unknown> })
+				.config,
+		).toMatchObject({
+			scanHeadLagBlocks: 24,
+			scanOverlapBlocks: 256,
+		});
+	});
+
 	it("rejects private chain endpoints and pins credentialed providers to official origins", async () => {
 		const privateChain = chainRow("ethereum", "evm", "ETH");
 		privateChain.endpoint = "https://127.0.0.1/rpc";

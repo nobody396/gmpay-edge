@@ -36,6 +36,8 @@ const configSchema = z.object({
 	blockLookback: z.number().int().min(1).max(20_000).default(3000),
 	logBlockRange: z.number().int().min(1).max(20_000).default(500),
 	maxScanTransactions: z.number().int().min(1).max(10_000).default(1000),
+	scanOverlapBlocks: z.number().int().min(0).max(20_000).default(0),
+	scanHeadLagBlocks: z.number().int().min(0).max(20_000).default(0),
 });
 export type EvmConfig = z.infer<typeof configSchema>;
 
@@ -232,11 +234,16 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 				counters,
 			),
 		);
-		if (input.sinceBlock != null && input.sinceBlock > BigInt(latest))
-			return { transactions: [], cursor: BigInt(latest) };
-		const earliest = Math.max(0, latest - this.config.blockLookback + 1);
+		const scannableLatest = Math.max(0, latest - this.config.scanHeadLagBlocks);
+		if (input.sinceBlock != null && input.sinceBlock > BigInt(scannableLatest))
+			return { transactions: [], cursor: input.sinceBlock };
+		const earliest = Math.max(
+			0,
+			scannableLatest - this.config.blockLookback + 1,
+		);
 		const from = input.sinceBlock == null ? earliest : Number(input.sinceBlock);
-		const to = Math.min(latest, from + this.config.blockLookback - 1);
+		const to = Math.min(scannableLatest, from + this.config.blockLookback - 1);
+		const cursor = retainedScanCursor(from, to, this.config.scanOverlapBlocks);
 		const token = this.token(input.assetCode);
 		if (token)
 			return {
@@ -250,10 +257,10 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 					deadlineAt,
 					counters,
 				),
-				cursor: BigInt(to),
+				cursor,
 			};
 		if (input.assetCode.toUpperCase() !== this.config.nativeAsset.toUpperCase())
-			return { transactions: [], cursor: BigInt(to) };
+			return { transactions: [], cursor };
 		return {
 			transactions: await this.findNativeTransfers(
 				input.address,
@@ -263,7 +270,7 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 				deadlineAt,
 				counters,
 			),
-			cursor: BigInt(to),
+			cursor,
 		};
 	}
 	async getConfirmations(transaction: NormalizedTransaction) {
@@ -661,4 +668,10 @@ function topicAddress(topic?: string) {
 }
 function confirmationCount(latest: number, block: number) {
 	return Math.max(0, latest - block + 1);
+}
+
+function retainedScanCursor(from: number, to: number, overlapBlocks: number) {
+	if (overlapBlocks === 0) return BigInt(to);
+	const replayedBlocks = Math.min(overlapBlocks, Math.max(0, to - from));
+	return BigInt(to - replayedBlocks + (replayedBlocks > 0 ? 1 : 0));
 }

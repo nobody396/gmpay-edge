@@ -147,6 +147,26 @@ describe("payment scan scheduling fairness", () => {
 		expect(order?.payment_scan_cursor).toBe("101");
 	});
 
+	it("persists the adapter scan boundary instead of a newer transaction block", async () => {
+		await db
+			.prepare(
+				"UPDATE orders SET payment_scan_cursor = NULL WHERE id = 'order-a'",
+			)
+			.run();
+
+		await advancePaymentScanCursor(db, "order-a", [{ blockNumber: 100n }], 97n);
+
+		const order = await db
+			.prepare("SELECT payment_scan_cursor FROM orders WHERE id = 'order-a'")
+			.first<{ payment_scan_cursor: string | null }>();
+		expect(order?.payment_scan_cursor).toBe("97");
+		await db
+			.prepare(
+				"UPDATE orders SET payment_scan_cursor = '101' WHERE id = 'order-a'",
+			)
+			.run();
+	});
+
 	it("keeps the persisted provider cursor in D1 for the Queue consumer", async () => {
 		await db.batch([
 			db.prepare("UPDATE orders SET last_payment_scan_at = NULL"),

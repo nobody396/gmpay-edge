@@ -13,6 +13,12 @@ import { isSafePublicUrl } from "#/lib/webhook-url";
 import { loadRuntimeConfig, type RuntimeConfig } from "#/server/runtime-config";
 import { loadPaymentConnectionApiKey } from "./connection-credentials";
 
+// BSC providers can expose a new head before address-filtered token logs are
+// indexed. Keep recent blocks behind the cursor so a transient empty response
+// is observed again on later scans instead of becoming a permanent gap.
+const bscScanOverlapBlocks = 256;
+const bscScanHeadLagBlocks = 24;
+
 type MethodConnection = {
 	connection_id: string;
 	adapter: string;
@@ -300,6 +306,10 @@ async function createAdapter(
 			blockLookback: connection.block_lookback ?? undefined,
 			logBlockRange: connection.log_block_range ?? undefined,
 			maxScanTransactions: connection.max_scan_transactions ?? undefined,
+			scanOverlapBlocks:
+				connection.rail_code === "bsc" ? bscScanOverlapBlocks : undefined,
+			scanHeadLagBlocks:
+				connection.rail_code === "bsc" ? bscScanHeadLagBlocks : undefined,
 			network: connection.rail_code,
 			nativeAsset: nativeAsset(connection),
 			tokens: tokenConfiguration(connection, "address"),

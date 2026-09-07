@@ -415,6 +415,115 @@ describe("EVM adapter", () => {
 		});
 	});
 
+	it("keeps an overlap behind a successful empty scan", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(rpc("0x1e"))
+			.mockResolvedValueOnce(rpc([]));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(
+			new EvmAdapter({
+				rpcUrl: "https://rpc.example",
+				network: "bsc",
+				nativeAsset: "BNB",
+				blockLookback: 10,
+				scanOverlapBlocks: 3,
+				tokens: { USDT: { address: usdt, decimals: 6 } },
+			}).findTransactionsWithCursor({
+				address: recipient,
+				assetCode: "USDT",
+				sinceBlock: 20n,
+			}),
+		).resolves.toEqual({ transactions: [], cursor: 27n });
+	});
+
+	it("recovers a token log that was temporarily absent from the provider", async () => {
+		const delayedLog = {
+			...transferLog(recipient, "0x1", "0x2"),
+			blockHash: "0xdelayed-block",
+			blockNumber: "0x1c",
+			transactionHash: "0xdelayed-payment",
+		};
+		vi.stubGlobal(
+			"fetch",
+			vi
+				.fn()
+				.mockResolvedValueOnce(rpc("0x1e"))
+				.mockResolvedValueOnce(rpc([]))
+				.mockResolvedValueOnce(rpc("0x20"))
+				.mockResolvedValueOnce(rpc([delayedLog]))
+				.mockResolvedValueOnce(
+					rpc({
+						hash: "0xdelayed-block",
+						number: "0x1c",
+						timestamp: "0x6553f100",
+						transactions: [],
+					}),
+				),
+		);
+		const bsc = new EvmAdapter({
+			rpcUrl: "https://rpc.example",
+			network: "bsc",
+			nativeAsset: "BNB",
+			blockLookback: 10,
+			scanOverlapBlocks: 3,
+			tokens: { USDT: { address: usdt, decimals: 6 } },
+		});
+
+		const first = await bsc.findTransactionsWithCursor({
+			address: recipient,
+			assetCode: "USDT",
+			sinceBlock: 20n,
+		});
+		const second = await bsc.findTransactionsWithCursor({
+			address: recipient,
+			assetCode: "USDT",
+			sinceBlock: first.cursor,
+		});
+
+		expect(second.transactions).toEqual([
+			expect.objectContaining({
+				network: "bsc",
+				hash: "0xdelayed-payment",
+				to: recipient,
+				amountUnits: 2n,
+				blockNumber: 28n,
+			}),
+		]);
+	});
+
+	it("does not scan the unindexed BSC head", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(rpc("0x1e"))
+			.mockResolvedValueOnce(rpc([]));
+		vi.stubGlobal("fetch", fetchMock);
+
+		await expect(
+			new EvmAdapter({
+				rpcUrl: "https://rpc.example",
+				network: "bsc",
+				nativeAsset: "BNB",
+				blockLookback: 10,
+				scanHeadLagBlocks: 3,
+				tokens: { USDT: { address: usdt, decimals: 6 } },
+			}).findTransactionsWithCursor({
+				address: recipient,
+				assetCode: "USDT",
+				sinceBlock: 20n,
+			}),
+		).resolves.toEqual({ transactions: [], cursor: 27n });
+
+		const request = JSON.parse(
+			String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+		) as { params: Array<{ fromBlock: string; toBlock: string }> };
+		expect(request.params[0]).toMatchObject({
+			fromBlock: "0x14",
+			toBlock: "0x1b",
+		});
+	});
+
 	it("rejects token result fan-out above the configured scan limit", async () => {
 		vi.stubGlobal(
 			"fetch",

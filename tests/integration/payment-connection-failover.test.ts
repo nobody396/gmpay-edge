@@ -135,13 +135,114 @@ describe("payment connection failover", () => {
 		]);
 	});
 
+	it("checks the next connection when the primary reports no payment", async () => {
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		await db.batch([
+			db.prepare(
+				"UPDATE payment_ingresses SET health_status = 'healthy', last_error_code = NULL",
+			),
+			db.prepare(
+				"UPDATE orders SET status = 'pending', received_amount_units = '0', paid_at = NULL, payment_scan_cursor = NULL, version = 0 WHERE id = 'order-eth'",
+			),
+			db.prepare("DELETE FROM order_payments WHERE order_id = 'order-eth'"),
+			db.prepare(
+				"DELETE FROM blockchain_transactions WHERE network = 'ethereum'",
+			),
+			db.prepare("DELETE FROM webhook_events WHERE order_id = 'order-eth'"),
+		]);
+
+		const calls: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				calls.push(url);
+				const request = JSON.parse(String(init?.body)) as {
+					method: string;
+					params: string[];
+				};
+				if (request.method === "eth_blockNumber") return rpc("0xa");
+				if (request.method === "eth_getBlockByNumber") {
+					const blockNumber = request.params[0];
+					if (!blockNumber) throw new Error("Expected a block number");
+					const hasPayment = url.includes("fallback") && blockNumber === "0x9";
+					return rpc({
+						hash: `0xblock${blockNumber.slice(2)}`,
+						number: blockNumber,
+						timestamp: "0x6553f100",
+						transactions: hasPayment
+							? [
+									{
+										blockHash: "0xblock9",
+										blockNumber: "0x9",
+										from: "0x2222222222222222222222222222222222222222",
+										hash: "0xdelayedpayment",
+										to: "0x1111111111111111111111111111111111111111",
+										value: "0xde0b6b3a7640000",
+									},
+								]
+							: [],
+					});
+				}
+				if (request.method === "eth_getTransactionReceipt")
+					return rpc({
+						blockHash: "0xblock9",
+						blockNumber: "0x9",
+						logs: [],
+						status: "0x1",
+						transactionHash: "0xdelayedpayment",
+					});
+				throw new Error(`Unexpected RPC method ${request.method}`);
+			}),
+		);
+
+		const ack = vi.fn();
+		const retry = vi.fn();
+		await handlePaymentScan(
+			{
+				body: {
+					kind: "payment.scan",
+					version: 1,
+					receivingMethodId: "asset-eth",
+					orderId: "order-eth",
+				},
+				ack,
+				retry,
+			} as unknown as Message<
+				import("#/features/payments/types").PaymentScanMessage
+			>,
+			{ DB: db } as Env,
+		);
+
+		expect(calls.some((url) => url.includes("fallback"))).toBe(true);
+		expect(retry).not.toHaveBeenCalled();
+		expect(ack).toHaveBeenCalledOnce();
+		await expect(
+			db
+				.prepare(
+					"SELECT status, received_amount_units FROM orders WHERE id = 'order-eth'",
+				)
+				.first(),
+		).resolves.toMatchObject({
+			status: "paid",
+			received_amount_units: "1000000000000000000",
+		});
+	});
+
 	it("does not attribute a downstream D1 failure to the provider or fail over", async () => {
 		vi.spyOn(Math, "random").mockReturnValue(0);
-		await db
-			.prepare(
+		await db.batch([
+			db.prepare(
 				"UPDATE payment_ingresses SET health_status = 'healthy', last_error_code = NULL",
-			)
-			.run();
+			),
+			db.prepare(
+				"UPDATE orders SET status = 'pending', received_amount_units = '0', paid_at = NULL, payment_scan_cursor = NULL, version = 0 WHERE id = 'order-eth'",
+			),
+			db.prepare("DELETE FROM order_payments WHERE order_id = 'order-eth'"),
+			db.prepare(
+				"DELETE FROM blockchain_transactions WHERE network = 'ethereum'",
+			),
+		]);
 		await db
 			.prepare(
 				`CREATE TRIGGER reject_healthy_connection_update
