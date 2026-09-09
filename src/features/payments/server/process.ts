@@ -70,11 +70,7 @@ export async function recordPaymentTransaction(
 	if (
 		transaction.network !== order.network ||
 		transaction.assetCode !== order.code ||
-		!paymentTargetAddressMatches(
-			transaction.network,
-			transaction.to,
-			order.address,
-		) ||
+		!paymentTargetAddressMatches(transaction.to, order.address) ||
 		transaction.amountUnits <= 0n
 	) {
 		throw new DomainError(

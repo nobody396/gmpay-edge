@@ -7,7 +7,6 @@ import {
 import { recordPaymentTransaction } from "#/features/payments/server/process";
 import type { PaymentScanMessage } from "#/features/payments/types";
 import type {
-	Network,
 	NormalizedTransaction,
 	PaymentAdapter,
 } from "#/integrations/chains/types";
@@ -252,7 +251,7 @@ export async function refreshPendingPaymentTransactions(
 		)
 		.bind(orderId)
 		.all<{
-			network: Network;
+			network: string;
 			tx_hash: string;
 			event_index: number;
 			from_address: string;

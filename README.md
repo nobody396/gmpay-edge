@@ -61,6 +61,7 @@ the protected `/admin` application.
 | On-chain | Base | USDT, USDC, ETH |
 | On-chain | BNB Smart Chain / BEP20 | USDT, USDC, BNB |
 | On-chain | Polygon | USDT, USDC, MATIC |
+| On-chain | X Layer | USDT0 |
 | On-chain | TON | USDT, GRAM |
 | On-chain | Aptos | USDT, USDC |
 | On-chain | Solana | USDT, USDC |

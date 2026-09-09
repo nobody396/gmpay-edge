@@ -10,7 +10,10 @@ import {
 import { reconcilePaymentInfrastructure } from "#/features/installation/server/reconcile-payment-infrastructure";
 import { initialExchangeRates } from "#/features/payment-settings/catalog";
 import { testPaymentConnection } from "#/features/payment-settings/server/connection-health";
-import { loadPaymentConnectionHealthTargets } from "#/features/payment-settings/server/method-adapter";
+import {
+	createPaymentMethodAdapters,
+	loadPaymentConnectionHealthTargets,
+} from "#/features/payment-settings/server/method-adapter";
 import { queryPublicPaymentMethods } from "#/features/status/server/assets-query";
 import { createInitialRuntimeConfig } from "#/server/runtime-config";
 import {
@@ -99,9 +102,9 @@ describe("system installation", { timeout: 30_000 }, () => {
 			root_users: 1,
 			audits: 1,
 			runtime_settings: 4,
-			payment_rails: 11,
-			payment_ingresses: 15,
-			payment_assets: 28,
+			payment_rails: 12,
+			payment_ingresses: 17,
+			payment_assets: 29,
 			receiving_methods: 0,
 			exchange_rates: initialExchangeRates.length,
 			telegram_bots: 0,
@@ -117,6 +120,7 @@ describe("system installation", { timeout: 30_000 }, () => {
 				"base",
 				"bsc",
 				"polygon",
+				"xlayer",
 				"ton",
 				"aptos",
 				"solana",
@@ -220,6 +224,7 @@ describe("system installation", { timeout: 30_000 }, () => {
 			{ code: "solana", kind: "chain", adapter: "solana" },
 			{ code: "ton", kind: "chain", adapter: "ton" },
 			{ code: "tron", kind: "chain", adapter: "tron" },
+			{ code: "xlayer", kind: "chain", adapter: "evm" },
 		]);
 
 		const assets = await database
@@ -267,6 +272,7 @@ describe("system installation", { timeout: 30_000 }, () => {
 			"ton:USDT:token:6",
 			"tron:TRX:native:6",
 			"tron:USDT:token:6",
+			"xlayer:USDT:token:6",
 		]);
 		expect(
 			assets.results.every((asset) =>
@@ -286,12 +292,20 @@ describe("system installation", { timeout: 30_000 }, () => {
 				priority: number;
 				enabled: number;
 			}>();
-		expect(rpcPolicy.results).toHaveLength(12);
+		expect(rpcPolicy.results).toHaveLength(14);
 		expect(
 			rpcPolicy.results
 				.filter((node) => node.transport === "http")
-				.every((node) => node.enabled === 1 && node.priority === 100),
+				.every((node) => node.enabled === 1),
 		).toBe(true);
+		expect(
+			rpcPolicy.results
+				.filter(
+					(node) => node.transport === "http" && node.rail_code === "xlayer",
+				)
+				.map((node) => node.priority)
+				.sort((left, right) => left - right),
+		).toEqual([100, 110]);
 		expect(
 			rpcPolicy.results
 				.filter((node) => node.transport === "websocket")
@@ -301,8 +315,13 @@ describe("system installation", { timeout: 30_000 }, () => {
 			database,
 			20,
 		);
-		expect(healthTargets).toHaveLength(8);
+		expect(healthTargets).toHaveLength(10);
 		expect(healthTargets.every((target) => target.adapter !== null)).toBe(true);
+		expect(
+			(await createPaymentMethodAdapters(database, "xlayer-usdt")).map(
+				(candidate) => candidate.connectionId,
+			),
+		).toEqual(["connection-xlayer-default", "connection-xlayer-secondary"]);
 		const providerEndpoints = await database
 			.prepare(
 				"SELECT rail_code, endpoint, enabled FROM payment_ingresses WHERE type = 'provider' ORDER BY rail_code",
@@ -340,7 +359,7 @@ describe("system installation", { timeout: 30_000 }, () => {
 				default_confirmations: number;
 				rail: string;
 			}>();
-		expect(methodPolicy.results).toHaveLength(28);
+		expect(methodPolicy.results).toHaveLength(29);
 		expect(
 			methodPolicy.results.find((method) => method.rail === "tron"),
 		).toMatchObject({ default_confirmations: 20 });
@@ -446,12 +465,17 @@ describe("system installation", { timeout: 30_000 }, () => {
 			database
 				.prepare("UPDATE payment_ingresses SET endpoint = NULL WHERE id = ?")
 				.bind("connection-okx-default"),
+			database.prepare(
+				`UPDATE payment_rails
+				 SET metadata = json_remove(metadata, '$.chainId')
+				 WHERE code = 'polygon'`,
+			),
 		]);
 
 		await expect(
 			reconcilePaymentInfrastructure(database, 1_800_000_000_000),
 		).resolves.toEqual({
-			rails: 0,
+			rails: 1,
 			assets: 1,
 			connections: 1,
 			exchangeRates: 1,
@@ -476,6 +500,12 @@ describe("system installation", { timeout: 30_000 }, () => {
 			.bind("connection-okx-default")
 			.first<{ endpoint: string; enabled: number }>();
 		expect(okx).toEqual({ endpoint: "https://www.okx.com", enabled: 1 });
+		const polygon = await database
+			.prepare(
+				"SELECT json_extract(metadata, '$.chainId') AS chain_id FROM payment_rails WHERE code = 'polygon'",
+			)
+			.first<{ chain_id: number }>();
+		expect(polygon).toEqual({ chain_id: 137 });
 		const solRate = await database
 			.prepare("SELECT raw_rate, rate FROM exchange_rates WHERE id = ?")
 			.bind("rate-sol-usdt")

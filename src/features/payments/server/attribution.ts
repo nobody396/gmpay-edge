@@ -9,12 +9,9 @@ type AttributionCandidate = {
 	received_amount_units: string;
 };
 
-const caseInsensitiveAddressNetworks = new Set([
-	"ethereum",
-	"base",
-	"bsc",
-	"polygon",
-]);
+function isEvmAddress(value: string) {
+	return /^0x[0-9a-f]{40}$/i.test(value);
+}
 
 export type PaymentAttribution = {
 	orderId: string;
@@ -62,12 +59,11 @@ export async function resolvePaymentTransactionOrder(
 		.first<{ order_id: string }>();
 	if (existing) return { orderId: existing.order_id, alreadyAttributed: true };
 
-	const targetPredicate = caseInsensitiveAddressNetworks.has(
-		transaction.network,
-	)
+	const caseInsensitiveTarget = isEvmAddress(transaction.to);
+	const targetPredicate = caseInsensitiveTarget
 		? "LOWER(ops.target_value) = LOWER(?)"
 		: "ops.target_value = ?";
-	const targetIndex = caseInsensitiveAddressNetworks.has(transaction.network)
+	const targetIndex = caseInsensitiveTarget
 		? "order_payment_snapshots_target_nocase_idx"
 		: "order_payment_snapshots_target_idx";
 	const candidates = await db
@@ -127,12 +123,8 @@ export async function resolvePaymentTransactionOrder(
 	throw new PaymentAttributionNotFoundError();
 }
 
-export function paymentTargetAddressMatches(
-	network: string,
-	left: string,
-	right: string,
-) {
-	return caseInsensitiveAddressNetworks.has(network)
+export function paymentTargetAddressMatches(left: string, right: string) {
+	return isEvmAddress(left) && isEvmAddress(right)
 		? left.toLowerCase() === right.toLowerCase()
 		: left === right;
 }

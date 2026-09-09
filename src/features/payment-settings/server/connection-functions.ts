@@ -18,13 +18,13 @@ import { testPaymentConnection } from "#/features/payment-settings/server/connec
 
 const railKindSchema = z.enum(["chain", "exchange", "wallet"]);
 type RailKind = z.infer<typeof railKindSchema>;
-const evmRailCodes = new Set(["ethereum", "base", "bsc", "polygon"]);
 
 type PaymentIngressRow = {
 	id: string;
 	name: string;
 	rail_code: string;
 	rail_name: string;
+	rail_adapter: string;
 	kind: RailKind;
 	type: "rpc" | "provider" | "provider_webhook";
 	transport: "http" | "websocket" | "webhook";
@@ -48,6 +48,7 @@ type PaymentRailRow = {
 	code: string;
 	name: string;
 	kind: RailKind;
+	adapter: string;
 };
 
 export const getPaymentIngressesPageFn = createServerFn({
@@ -57,7 +58,7 @@ export const getPaymentIngressesPageFn = createServerFn({
 	const [ingresses, rails] = await db.batch([
 		db.prepare(
 			`SELECT pc.id, pc.name, COALESCE(pc.rail_code, pc.network) AS rail_code,
-				 COALESCE(pr.name, pc.network) AS rail_name, pr.kind,
+				 COALESCE(pr.name, pc.network) AS rail_name, pr.adapter AS rail_adapter, pr.kind,
 				 pc.type, pc.transport, COALESCE(pc.endpoint, pc.external_source_id) AS endpoint,
 				 pc.priority, pc.enabled, pc.health_status,
 				 pc.last_latency_ms, pc.last_checked_at, pc.last_error_code,
@@ -71,7 +72,7 @@ export const getPaymentIngressesPageFn = createServerFn({
 				 ORDER BY pr.kind, pc.rail_code, pc.priority, pc.name`,
 		),
 		db.prepare(
-			"SELECT code, name, kind FROM payment_rails ORDER BY kind, name",
+			"SELECT code, name, kind, adapter FROM payment_rails ORDER BY kind, name",
 		),
 	]);
 	return {
@@ -176,7 +177,7 @@ export const updateChainConnectionFn = createServerFn({ method: "POST" })
 				 connection.last_checked_at, connection.last_latency_ms,
 				 connection.last_error_code, connection.timeout_ms,
 				 connection.block_lookback, connection.log_block_range,
-				 connection.max_scan_transactions, rail.kind
+				 connection.max_scan_transactions, rail.kind, rail.adapter
 				 FROM payment_ingresses connection
 				 LEFT JOIN payment_ingress_credentials credential ON credential.payment_ingress_id = connection.id
 				 JOIN payment_rails rail ON rail.code = connection.rail_code
@@ -201,14 +202,13 @@ export const updateChainConnectionFn = createServerFn({ method: "POST" })
 				log_block_range: number | null;
 				max_scan_transactions: number | null;
 				kind: "chain" | "exchange" | "wallet";
+				adapter: string;
 			}>();
 		if (!current || current.kind !== "chain")
 			throw paymentSettingsError("payment_connection_not_found");
 		if (
 			data.transport === "websocket" &&
-			!["ethereum", "base", "bsc", "polygon", "solana"].includes(
-				current.rail_code,
-			)
+			!["evm", "solana"].includes(current.adapter)
 		)
 			throw paymentSettingsError("payment_connection_transport_unsupported");
 		const currentApiKey = await loadPaymentConnectionApiKey(
@@ -225,14 +225,15 @@ export const updateChainConnectionFn = createServerFn({ method: "POST" })
 			current.transport !== data.transport ||
 			current.endpoint !== data.endpoint ||
 			Boolean(replacementApiKey);
-		const scanConfig = evmRailCodes.has(current.rail_code)
-			? data
-			: {
-					timeoutMs: undefined,
-					blockLookback: undefined,
-					logBlockRange: undefined,
-					maxScanTransactions: undefined,
-				};
+		const scanConfig =
+			current.adapter === "evm"
+				? data
+				: {
+						timeoutMs: undefined,
+						blockLookback: undefined,
+						logBlockRange: undefined,
+						maxScanTransactions: undefined,
+					};
 		const now = Date.now();
 		const credentialStatement = replacementApiKey
 			? context.db
@@ -333,27 +334,28 @@ export const createPaymentConnectionFn = createServerFn({ method: "POST" })
 	.handler(async ({ data }) => {
 		const context = await adminContext(paymentSettingsPermission("create"));
 		const rail = await context.db
-			.prepare("SELECT kind FROM payment_rails WHERE code = ? LIMIT 1")
+			.prepare("SELECT kind, adapter FROM payment_rails WHERE code = ? LIMIT 1")
 			.bind(data.railCode)
-			.first<{ kind: "chain" | "exchange" | "wallet" }>();
+			.first<{ kind: "chain" | "exchange" | "wallet"; adapter: string }>();
 		if (!rail) throw paymentSettingsError("payment_rail_not_found");
 		if (rail.kind !== "chain")
 			throw paymentSettingsError("payment_rail_connection_managed");
 		if (
 			data.transport === "websocket" &&
-			!["ethereum", "base", "bsc", "polygon", "solana"].includes(data.railCode)
+			!["evm", "solana"].includes(rail.adapter)
 		)
 			throw paymentSettingsError("payment_connection_transport_unsupported");
 		const id = crypto.randomUUID();
 		const now = Date.now();
-		const scanConfig = evmRailCodes.has(data.railCode)
-			? data
-			: {
-					timeoutMs: undefined,
-					blockLookback: undefined,
-					logBlockRange: undefined,
-					maxScanTransactions: undefined,
-				};
+		const scanConfig =
+			rail.adapter === "evm"
+				? data
+				: {
+						timeoutMs: undefined,
+						blockLookback: undefined,
+						logBlockRange: undefined,
+						maxScanTransactions: undefined,
+					};
 		await context.db
 			.prepare(
 				`INSERT INTO payment_ingresses

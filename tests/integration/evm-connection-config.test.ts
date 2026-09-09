@@ -20,7 +20,7 @@ describe("EVM connection scan configuration", () => {
 			db.prepare(
 				`INSERT OR IGNORE INTO payment_rails
 				 (code, name, kind, adapter, metadata, created_at, updated_at)
-				 VALUES ('ethereum', 'Ethereum', 'chain', 'evm', '{"nativeSymbol":"ETH"}', 1, 1)`,
+				 VALUES ('ethereum', 'Ethereum', 'chain', 'evm', '{"nativeSymbol":"ETH","chainId":1}', 1, 1)`,
 			),
 			db.prepare(
 				`INSERT INTO payment_assets
@@ -59,6 +59,7 @@ describe("EVM connection scan configuration", () => {
 		);
 		expect(adapter).toBeInstanceOf(EvmAdapter);
 		expect((adapter as EvmAdapter).config).toMatchObject({
+			expectedChainId: 1,
 			timeoutMs: 12_000,
 			blockLookback: 2400,
 			logBlockRange: 240,

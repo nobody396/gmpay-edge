@@ -313,29 +313,46 @@ describe("Cloudflare Queue envelope rejection", () => {
 	it("consumes a due rate-sync message through the payment Queue", async () => {
 		const ack = vi.fn();
 		const retry = vi.fn();
-		await handleQueue(
-			{
-				queue: "gmpay-edge-payments",
-				messages: [
-					{
-						id: "rate-sync-crypto",
-						timestamp: new Date(),
-						attempts: 1,
-						body: {
-							kind: "payment.rate_sync",
-							version: 1,
-							category: "crypto",
-						},
-						ack,
-						retry,
-					},
-				],
-			} as unknown as Parameters<typeof handleQueue>[0],
-			{ DB: database } as Env,
+		const request = vi.fn().mockResolvedValue(
+			Response.json([
+				{ symbol: "APTUSDT", price: "0.619" },
+				{ symbol: "BNBUSDT", price: "580.1" },
+				{ symbol: "ETHUSDT", price: "1869" },
+				{ symbol: "TONUSDT", price: "1.6" },
+				{ symbol: "POLUSDT", price: "0.08419" },
+				{ symbol: "SOLUSDT", price: "77.07" },
+				{ symbol: "TRXUSDT", price: "0.3252" },
+			]),
 		);
+		vi.stubGlobal("fetch", request);
+		try {
+			await handleQueue(
+				{
+					queue: "gmpay-edge-payments",
+					messages: [
+						{
+							id: "rate-sync-crypto",
+							timestamp: new Date(),
+							attempts: 1,
+							body: {
+								kind: "payment.rate_sync",
+								version: 1,
+								category: "crypto",
+							},
+							ack,
+							retry,
+						},
+					],
+				} as unknown as Parameters<typeof handleQueue>[0],
+				{ DB: database } as Env,
+			);
+		} finally {
+			vi.unstubAllGlobals();
+		}
 
 		expect(ack).toHaveBeenCalledOnce();
 		expect(retry).not.toHaveBeenCalled();
+		expect(request).toHaveBeenCalledOnce();
 	});
 
 	it("consumes a bounded RPC-health batch through the payment Queue", async () => {
