@@ -59,6 +59,8 @@ export function repositoryIconUrls(
 ) {
 	const chain = normalizeAssetNetwork(network);
 	if (!chain) return [];
+	if (chain === "xlayer" && !contractAddress?.trim())
+		return ["/icons/xlayer.svg"];
 	const path = contractAddress?.trim()
 		? `blockchains/${chain}/assets/${contractAddress.trim()}/logo.png`
 		: `blockchains/${chain}/info/logo.png`;
