@@ -69,27 +69,39 @@ export async function resolveWebhookHostname(
 	hostname: string,
 	fetcher: typeof fetch = fetch,
 ) {
-	const responses = await Promise.all(
-		["A", "AAAA"].map((type) =>
-			fetcher(
-				`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`,
-				{
-					headers: { accept: "application/dns-json" },
-					redirect: "error",
-					signal: AbortSignal.timeout(3_000),
-				},
-			),
-		),
-	);
-	const addresses: string[] = [];
-	for (const response of responses) {
-		if (!response.ok) throw new Error("Webhook DNS resolution failed");
-		const result = dnsResponseSchema.parse(await response.json());
-		if (result.Status !== 0) continue;
-		for (const answer of result.Answer ?? [])
-			if (answer.type === 1 || answer.type === 28) addresses.push(answer.data);
+	const resolvers = [
+		(type: string) =>
+			`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`,
+		(type: string) =>
+			`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=${type}`,
+	];
+	for (const resolveUrl of resolvers) {
+		try {
+			const responses = await Promise.all(
+				["A", "AAAA"].map((type) =>
+					fetcher(resolveUrl(type), {
+						headers: { accept: "application/dns-json" },
+						redirect: "error",
+						signal: AbortSignal.timeout(3_000),
+					}),
+				),
+			);
+			const addresses: string[] = [];
+			for (const response of responses) {
+				if (!response.ok) throw new Error("Webhook DNS resolution failed");
+				const result = dnsResponseSchema.parse(await response.json());
+				if (result.Status !== 0) continue;
+				for (const answer of result.Answer ?? [])
+					if (answer.type === 1 || answer.type === 28)
+						addresses.push(answer.data);
+			}
+			if (addresses.length > 0) return addresses;
+		} catch {
+			// Try the independent resolver. Both record types must succeed so the
+			// caller never approves a hostname whose private AAAA record was hidden.
+		}
 	}
-	return addresses;
+	throw new Error("Webhook DNS resolution failed");
 }
 
 function isIpAddress(hostname: string) {

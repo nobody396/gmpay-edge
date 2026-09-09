@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	assertSafeResolvedWebhookUrl,
 	isSafeWebhookUrl,
+	resolveWebhookHostname,
 } from "#/lib/webhook-url";
 
 describe("webhook URL validation", () => {
@@ -51,5 +52,31 @@ describe("webhook URL validation", () => {
 				async () => [],
 			),
 		).resolves.toBe(false);
+	});
+
+	it("uses an independent DNS resolver when the primary resolver fails", async () => {
+		const fetcher = async (input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url.includes("cloudflare-dns.com"))
+				throw new Error("primary unavailable");
+			const type = new URL(url).searchParams.get("type");
+			return Response.json({
+				Status: 0,
+				Answer:
+					type === "A" ? [{ type: 1, data: "93.184.216.34" }] : [],
+			});
+		};
+
+		await expect(
+			resolveWebhookHostname("merchant.example", fetcher as typeof fetch),
+		).resolves.toEqual(["93.184.216.34"]);
+	});
+
+	it("fails closed when every DNS resolver fails", async () => {
+		await expect(
+			resolveWebhookHostname("merchant.example", async () => {
+				throw new Error("resolver unavailable");
+			}),
+		).rejects.toThrow("Webhook DNS resolution failed");
 	});
 });
