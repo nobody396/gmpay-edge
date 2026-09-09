@@ -107,7 +107,16 @@ export async function processWebhookMessage(
 		)
 			throw new Error("Webhook delivery hostname did not resolve publicly");
 		result = await deliverWebhook(delivery, fetcher, settings.webhookTimeoutMs);
-	} catch {
+	} catch (error) {
+		console.error(
+			JSON.stringify({
+				event: "webhook_delivery_configuration_error",
+				deliveryId: message.body.deliveryId,
+				eventId: message.body.eventId,
+				attempt,
+				reason: webhookConfigurationErrorReason(error),
+			}),
+		);
 		result = {
 			success: false as const,
 			durationMs: Date.now() - startedAt,
@@ -190,6 +199,24 @@ export async function processWebhookMessage(
 	}
 	message.ack();
 	return result;
+}
+
+export function webhookConfigurationErrorReason(error: unknown) {
+	if (!(error instanceof Error)) return "unknown";
+	if (error.message.includes("hostname did not resolve publicly"))
+		return "dns_validation_failed";
+	if (error.message.includes("configuration not found"))
+		return "configuration_not_found";
+	if (error.message.includes("protocol is unavailable"))
+		return "protocol_unavailable";
+	if (error.message.includes("not a public HTTPS endpoint"))
+		return "unsafe_url";
+	if (error.message.includes("signing secret is unavailable"))
+		return "signing_secret_unavailable";
+	if (error.name === "OperationError") return "secret_decryption_failed";
+	if (error.name === "ZodError" || error.name === "SyntaxError")
+		return "payload_invalid";
+	return "unknown";
 }
 
 export function redactResponseExcerpt(value: string | undefined) {

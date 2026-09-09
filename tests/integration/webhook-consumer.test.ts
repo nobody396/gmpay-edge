@@ -9,6 +9,7 @@ import {
 	processWebhookMessage,
 	redactResponseExcerpt,
 	type WebhookQueueMessageLike,
+	webhookConfigurationErrorReason,
 } from "#/features/webhooks/server/consumer";
 import { recoverWebhookOutbox } from "#/features/webhooks/server/outbox";
 import {
@@ -43,6 +44,22 @@ describe("Webhook queue consumer on D1", () => {
 		).toBe('{"message":"failed","apiKey":"[REDACTED]"}');
 		expect(redactResponseExcerpt("token=merchant-secret")).toBe(
 			"[REDACTED_UNPARSEABLE]",
+		);
+	});
+
+	it("classifies configuration failures without logging sensitive details", () => {
+		expect(
+			webhookConfigurationErrorReason(
+				new Error("Webhook delivery hostname did not resolve publicly"),
+			),
+		).toBe("dns_validation_failed");
+		expect(
+			webhookConfigurationErrorReason(
+				new DOMException("decrypt failed", "OperationError"),
+			),
+		).toBe("secret_decryption_failed");
+		expect(webhookConfigurationErrorReason(new Error("unexpected"))).toBe(
+			"unknown",
 		);
 	});
 
