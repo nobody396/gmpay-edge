@@ -101,11 +101,26 @@ export async function processWebhookMessage(
 		const resolveHostname =
 			context.resolveHostname ??
 			(fetcher === fetch ? resolveWebhookHostname : undefined);
-		if (
-			resolveHostname &&
-			!(await assertSafeResolvedWebhookUrl(delivery.url, resolveHostname))
-		)
-			throw new Error("Webhook delivery hostname did not resolve publicly");
+		if (resolveHostname) {
+			let safe: boolean;
+			try {
+				safe = await assertSafeResolvedWebhookUrl(delivery.url, resolveHostname);
+			} catch (error) {
+				if (settings.webhookDnsFailurePolicy !== "deliver") throw error;
+				if (!isSafeWebhookUrl(delivery.url)) throw error;
+				safe = true;
+				console.warn(
+					JSON.stringify({
+						event: "webhook_dns_resolution_bypassed",
+						deliveryId: message.body.deliveryId,
+					}),
+				);
+			}
+			if (!safe)
+				throw new Error(
+					"Webhook delivery hostname did not resolve publicly",
+				);
+		}
 		result = await deliverWebhook(delivery, fetcher, settings.webhookTimeoutMs);
 	} catch (error) {
 		console.error(

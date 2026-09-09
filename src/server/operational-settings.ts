@@ -11,6 +11,7 @@ type OperationalSettings = {
 	latePaymentPolicy: "accept" | "review" | "reject";
 	webhookMaxAttempts: number;
 	webhookTimeoutMs: number;
+	webhookDnsFailurePolicy: "reject" | "deliver";
 	paymentScanBatchSize: number;
 	paymentScanIntervalMs: number;
 	webhookRecoveryIntervalMs: number;
@@ -27,6 +28,7 @@ const operationalSettingsSchema = z.object({
 	latePaymentPolicy: z.enum(["accept", "review", "reject"]),
 	webhookMaxAttempts: z.number().int().min(1).max(20),
 	webhookTimeoutMs: z.number().int().min(1_000).max(30_000),
+	webhookDnsFailurePolicy: z.enum(["reject", "deliver"]),
 	paymentScanBatchSize: z.number().int().min(1).max(100),
 	paymentScanIntervalMs: z.number().int().min(15_000).max(3_600_000),
 	webhookRecoveryIntervalMs: z.number().int().min(60_000).max(3_600_000),
@@ -42,6 +44,7 @@ const defaults: OperationalSettings = {
 	latePaymentPolicy: "review",
 	webhookMaxAttempts: 8,
 	webhookTimeoutMs: 10_000,
+	webhookDnsFailurePolicy: "reject",
 	paymentScanBatchSize: 100,
 	paymentScanIntervalMs: 60_000,
 	webhookRecoveryIntervalMs: 15 * 60_000,
@@ -58,6 +61,7 @@ const keys = {
 	"payments.late_payment_policy": "latePaymentPolicy",
 	"webhooks.max_attempts": "webhookMaxAttempts",
 	"webhooks.timeout_ms": "webhookTimeoutMs",
+	"webhooks.dns_failure_policy": "webhookDnsFailurePolicy",
 	"payments.scan_batch_size": "paymentScanBatchSize",
 	"payments.scan_interval_ms": "paymentScanIntervalMs",
 	"payments.webhook_recovery_interval_ms": "webhookRecoveryIntervalMs",
