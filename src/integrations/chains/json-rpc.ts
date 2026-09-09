@@ -82,7 +82,26 @@ async function requestHttp(
 		body: JSON.stringify(request),
 		signal: requestSignal(timeoutMs, signal),
 	});
-	if (!response.ok) throw new JsonRpcRequestError(response.status);
+	if (!response.ok) {
+		let payload: unknown;
+		try {
+			payload = await response.json();
+		} catch {
+			throw new JsonRpcRequestError(response.status);
+		}
+		if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+			const error = (payload as Record<string, unknown>).error;
+			if (error && typeof error === "object" && !Array.isArray(error))
+				throw new JsonRpcRequestError(
+					response.status,
+					typeof (error as Record<string, unknown>).code === "number"
+						? ((error as Record<string, unknown>).code as number)
+						: undefined,
+					"JSON-RPC provider returned an error",
+				);
+		}
+		throw new JsonRpcRequestError(response.status);
+	}
 	return response.json() as Promise<unknown>;
 }
 

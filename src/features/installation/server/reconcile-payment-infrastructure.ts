@@ -88,8 +88,9 @@ export async function reconcilePaymentInfrastructure(
 				.prepare(
 					`INSERT OR IGNORE INTO payment_ingresses
 					(id, rail_code, name, type, transport, endpoint, api_key, priority,
-					 enabled, health_status, created_at, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+					 enabled, health_status, block_lookback, log_block_range,
+					 created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
 				)
 				.bind(
 					connection.id,
@@ -101,6 +102,8 @@ export async function reconcilePaymentInfrastructure(
 					connection.priority,
 					connection.enabled,
 					connection.healthStatus,
+					"blockLookback" in connection ? connection.blockLookback : null,
+					"logBlockRange" in connection ? connection.logBlockRange : null,
 					now,
 					now,
 				),

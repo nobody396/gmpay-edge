@@ -228,10 +228,11 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 		const earliest = Math.max(0, latest - this.config.blockLookback + 1);
 		if (input.sinceBlock != null) {
 			if (input.sinceBlock > BigInt(latest)) return [];
-			if (input.sinceBlock < BigInt(earliest))
-				throw new Error("EVM scan exceeds the configured block lookback");
 		}
-		const from = input.sinceBlock == null ? earliest : Number(input.sinceBlock);
+		const from =
+			input.sinceBlock == null
+				? earliest
+				: Math.max(earliest, Number(input.sinceBlock));
 		const token = this.token(input.assetCode);
 		if (token)
 			return this.findTokenTransfers(
