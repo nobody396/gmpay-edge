@@ -66,10 +66,14 @@ describe("payment infrastructure catalog", () => {
 			expect.objectContaining({
 				endpoint: "https://rpc.xlayer.tech",
 				enabled: true,
+				blockLookback: 1200,
+				logBlockRange: 100,
 			}),
 			expect.objectContaining({
 				endpoint: "https://xlayerrpc.okx.com",
 				enabled: true,
+				blockLookback: 1200,
+				logBlockRange: 100,
 			}),
 		]);
 	});

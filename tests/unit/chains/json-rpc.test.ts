@@ -106,6 +106,28 @@ describe("JSON-RPC transports", () => {
 		expect(error.rpcCode).toBe(-32000);
 	});
 
+	it("preserves an RPC error code returned with HTTP 400", async () => {
+		vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			Response.json(
+				{
+					error: { code: -32602, message: "sensitive provider detail" },
+					id: 1,
+				},
+				{ status: 400 },
+			),
+		);
+		const error = await requestJsonRpc({
+			url: "https://rpc.example",
+			method: "eth_getLogs",
+			params: [],
+			timeoutMs: 1_000,
+		}).catch((cause) => cause);
+		expect(error).toBeInstanceOf(JsonRpcRequestError);
+		expect(String(error)).not.toContain("sensitive provider detail");
+		if (!(error instanceof JsonRpcRequestError)) throw error;
+		expect(error).toMatchObject({ status: 400, rpcCode: -32602 });
+	});
+
 	it("propagates the caller lifetime into an in-flight HTTP request", async () => {
 		const controller = new AbortController();
 		vi.spyOn(globalThis, "fetch").mockImplementation(

@@ -169,6 +169,8 @@ export const initialChainConnections = [
 		name: "X Layer RPC",
 		url: "https://rpc.xlayer.tech",
 		enabled: true,
+		blockLookback: 1200,
+		logBlockRange: 100,
 	},
 	{
 		id: "rpc-xlayer-secondary",
@@ -177,6 +179,8 @@ export const initialChainConnections = [
 		url: "https://xlayerrpc.okx.com",
 		enabled: true,
 		priority: 110,
+		blockLookback: 1200,
+		logBlockRange: 100,
 	},
 	{
 		id: "rpc-ton-default",
@@ -381,6 +385,8 @@ export const initialPaymentConnections = [
 		priority: "priority" in node ? node.priority : 100,
 		enabled: node.enabled,
 		healthStatus: "unknown" as const,
+		blockLookback: "blockLookback" in node ? node.blockLookback : null,
+		logBlockRange: "logBlockRange" in node ? node.logBlockRange : null,
 	})),
 	...initialExchangeRails.map((exchange) => ({
 		id: `connection-${exchange.code}-default`,

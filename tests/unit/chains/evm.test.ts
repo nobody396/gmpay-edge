@@ -393,8 +393,11 @@ describe("EVM adapter", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
-	it("rejects a sinceBlock outside the configured scan window", async () => {
-		const fetchMock = vi.fn().mockResolvedValue(rpc("0x1e"));
+	it("clamps a stale scan cursor to the configured lookback", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(rpc("0x1e"))
+			.mockResolvedValueOnce(rpc([]));
 		vi.stubGlobal("fetch", fetchMock);
 		await expect(
 			new EvmAdapter({
@@ -409,8 +412,14 @@ describe("EVM adapter", () => {
 				assetCode: "USDT",
 				sinceBlock: 20n,
 			}),
-		).rejects.toThrow("configured block lookback");
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		).resolves.toEqual([]);
+		const request = JSON.parse(
+			String((fetchMock.mock.calls[1]?.[1] as RequestInit).body),
+		) as { params: Array<{ fromBlock: string; toBlock: string }> };
+		expect(request.params[0]).toMatchObject({
+			fromBlock: "0x15",
+			toBlock: "0x1e",
+		});
 	});
 
 	it("rejects token result fan-out above the configured scan limit", async () => {
