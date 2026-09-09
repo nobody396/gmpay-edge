@@ -26,8 +26,9 @@ describe("authoritative operational settings", () => {
 			.prepare(
 				`DELETE FROM system_settings WHERE key IN (
 				 'orders.default_expiry_ms', 'orders.max_expiry_ms',
-				 'payments.late_payment_policy', 'webhooks.max_attempts',
-					 'webhooks.timeout_ms', 'payments.scan_batch_size',
+					 'payments.late_payment_policy', 'webhooks.max_attempts',
+					 'webhooks.timeout_ms', 'webhooks.dns_failure_policy',
+					 'payments.scan_batch_size',
 					 'payments.scan_interval_ms',
 					 'payments.webhook_recovery_interval_ms',
 					 'payments.rpc_health_interval_ms', 'payments.reorg_monitor_ms',
@@ -77,6 +78,7 @@ describe("authoritative operational settings", () => {
 			latePaymentPolicy: "review",
 			webhookMaxAttempts: 8,
 			webhookTimeoutMs: 10_000,
+			webhookDnsFailurePolicy: "reject",
 			paymentScanBatchSize: 25,
 			webhookRecoveryIntervalMs: 900_000,
 			rpcHealthIntervalMs: 900_000,
