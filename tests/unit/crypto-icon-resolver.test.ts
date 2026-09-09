@@ -20,6 +20,12 @@ describe("crypto icon resolver", () => {
 		expect(urls.every((url) => url.includes(path))).toBe(true);
 	});
 
+	it("uses the bundled X Layer network icon", () => {
+		expect(directAssetIconUrls({ network: "xlayer" })).toEqual([
+			"/icons/xlayer.svg",
+		]);
+	});
+
 	it("does not substitute a platform logo for an unknown currency", () => {
 		expect(symbolIconUrls("UNKNOWN")).toEqual([]);
 	});
