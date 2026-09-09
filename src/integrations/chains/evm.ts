@@ -9,17 +9,16 @@ import { operationDeadline, remainingOperationMs } from "./operation-deadline";
 import type {
 	AdapterErrorKind,
 	AdapterHealth,
-	Network,
 	NormalizedTransaction,
 	PaymentAdapter,
 	PaymentTarget,
 	TransactionLookup,
 } from "./types";
 
-const evmNetworks = ["ethereum", "base", "bsc", "polygon"] as const;
 const configSchema = z.object({
 	rpcUrl: z.url(),
-	network: z.enum(evmNetworks),
+	network: z.string().trim().min(1).max(32),
+	expectedChainId: z.number().int().positive().optional(),
 	nativeAsset: z.string().trim().min(2).max(12),
 	tokens: z
 		.record(
@@ -37,6 +36,8 @@ const configSchema = z.object({
 	maxScanTransactions: z.number().int().min(1).max(10_000).default(1000),
 });
 export type EvmConfig = z.infer<typeof configSchema>;
+
+class EvmChainIdMismatchError extends Error {}
 
 const transferTopic =
 	"0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -76,7 +77,7 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 	readonly id = "evm";
 	readonly configSchema = configSchema;
 	readonly config: EvmConfig;
-	readonly network: Network;
+	readonly network: string;
 
 	constructor(config: unknown) {
 		this.config = this.validateConfig(config);
@@ -384,8 +385,22 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 					operation: "health_check",
 					classifyError: (error) => this.classifyError(error),
 				},
-				(counters) =>
-					this.rpc("eth_chainId", [], undefined, undefined, counters),
+				async (counters) => {
+					const chainId = fromHex(
+						await this.rpc<string>(
+							"eth_chainId",
+							[],
+							undefined,
+							undefined,
+							counters,
+						),
+					);
+					if (
+						this.config.expectedChainId != null &&
+						chainId !== this.config.expectedChainId
+					)
+						throw new EvmChainIdMismatchError();
+				},
 			);
 			return {
 				healthy: true,
@@ -402,6 +417,7 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 		}
 	}
 	classifyError(error: unknown): AdapterErrorKind {
+		if (error instanceof EvmChainIdMismatchError) return "configuration";
 		if (error instanceof JsonRpcRequestError) {
 			if (error.status === 401 || error.status === 403) return "authentication";
 			if (error.status === 429) return "rate_limit";

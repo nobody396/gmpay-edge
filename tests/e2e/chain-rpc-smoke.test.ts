@@ -18,15 +18,17 @@ describe.skip("live chain RPC smoke", () => {
 	});
 
 	it.each([
-		["ethereum", "ETH", "https://ethereum-rpc.publicnode.com"],
-		["base", "ETH", "https://base-rpc.publicnode.com"],
-		["bsc", "BNB", "https://bsc-rpc.publicnode.com"],
-		["polygon", "MATIC", "https://polygon-bor-rpc.publicnode.com"],
-	] as const)("checks the %s EVM RPC", async (network, nativeAsset, fallback) => {
+		["ethereum", "ETH", 1, "https://ethereum-rpc.publicnode.com"],
+		["base", "ETH", 8453, "https://base-rpc.publicnode.com"],
+		["bsc", "BNB", 56, "https://bsc-rpc.publicnode.com"],
+		["polygon", "MATIC", 137, "https://polygon-bor-rpc.publicnode.com"],
+		["xlayer", "OKB", 196, "https://rpc.xlayer.tech"],
+	] as const)("checks the %s EVM RPC", async (network, nativeAsset, expectedChainId, fallback) => {
 		const prefix = network.toUpperCase();
 		const adapter = new EvmAdapter({
 			rpcUrl: process.env[`${prefix}_SMOKE_RPC_URL`] ?? fallback,
 			network,
+			expectedChainId,
 			nativeAsset,
 		});
 		await expect(adapter.healthCheck()).resolves.toMatchObject({

@@ -28,6 +28,7 @@ describe("EVM adapter", () => {
 		await new EvmAdapter({
 			rpcUrl: "wss://rpc.example",
 			network: "ethereum",
+			expectedChainId: 1,
 			nativeAsset: "ETH",
 			tokens: { USDT: { address: usdt, decimals: 6 } },
 		}).subscribeTransactions?.({
@@ -233,6 +234,7 @@ describe("EVM adapter", () => {
 		const nativeAdapter = new EvmAdapter({
 			rpcUrl: "https://rpc.example",
 			network: "ethereum",
+			expectedChainId: 1,
 			nativeAsset: "ETH",
 		});
 		await expect(
@@ -279,6 +281,7 @@ describe("EVM adapter", () => {
 		const native = new EvmAdapter({
 			rpcUrl: "https://rpc.example",
 			network: "ethereum",
+			expectedChainId: 1,
 			nativeAsset: "ETH",
 			timeoutMs: 1_000,
 		});
@@ -307,6 +310,7 @@ describe("EVM adapter", () => {
 		await new EvmAdapter({
 			rpcUrl: "https://rpc.example",
 			network: "ethereum",
+			expectedChainId: 1,
 			nativeAsset: "ETH",
 			logBlockRange: 10,
 			tokens: { USDT: { address: usdt, decimals: 6 } },
@@ -350,6 +354,7 @@ describe("EVM adapter", () => {
 		await new EvmAdapter({
 			rpcUrl: "https://rpc.example",
 			network: "ethereum",
+			expectedChainId: 1,
 			nativeAsset: "ETH",
 			logBlockRange: 1000,
 			tokens: { USDT: { address: usdt, decimals: 6 } },
@@ -375,6 +380,7 @@ describe("EVM adapter", () => {
 			new EvmAdapter({
 				rpcUrl: "https://rpc.example",
 				network: "ethereum",
+				expectedChainId: 1,
 				nativeAsset: "ETH",
 				logBlockRange: 1000,
 				tokens: { USDT: { address: usdt, decimals: 6 } },
@@ -394,6 +400,7 @@ describe("EVM adapter", () => {
 			new EvmAdapter({
 				rpcUrl: "https://rpc.example",
 				network: "ethereum",
+				expectedChainId: 1,
 				nativeAsset: "ETH",
 				blockLookback: 10,
 				tokens: { USDT: { address: usdt, decimals: 6 } },
@@ -423,6 +430,7 @@ describe("EVM adapter", () => {
 			new EvmAdapter({
 				rpcUrl: "https://rpc.example",
 				network: "ethereum",
+				expectedChainId: 1,
 				nativeAsset: "ETH",
 				blockLookback: 1,
 				maxScanTransactions: 1,
@@ -450,6 +458,14 @@ describe("EVM adapter", () => {
 		);
 	});
 
+	it("rejects an RPC endpoint serving the wrong EVM chain", async () => {
+		vi.stubGlobal("fetch", vi.fn().mockResolvedValue(rpc("0xc4")));
+		await expect(adapter().healthCheck()).resolves.toMatchObject({
+			healthy: false,
+			detail: "EVM health check failed: configuration",
+		});
+	});
+
 	it("redacts unexpected provider failures from health details", async () => {
 		vi.stubGlobal(
 			"fetch",
@@ -468,6 +484,7 @@ function adapter() {
 	return new EvmAdapter({
 		rpcUrl: "https://rpc.example",
 		network: "ethereum",
+		expectedChainId: 1,
 		nativeAsset: "ETH",
 		tokens: { USDT: { address: usdt, decimals: 6 } },
 	});

@@ -64,11 +64,20 @@ async function requestHttp(
 	apiKey?: string,
 	signal?: AbortSignal,
 ) {
-	const response = await fetch(url, {
+	const endpointCredential = "__API_KEY__";
+	const credentialInEndpoint = Boolean(
+		apiKey && url.includes(endpointCredential),
+	);
+	const requestUrl = credentialInEndpoint
+		? url.replace(endpointCredential, encodeURIComponent(apiKey ?? ""))
+		: url;
+	const response = await fetch(requestUrl, {
 		method: "POST",
 		headers: {
 			"content-type": "application/json",
-			...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+			...(apiKey && !credentialInEndpoint
+				? { authorization: `Bearer ${apiKey}` }
+				: {}),
 		},
 		body: JSON.stringify(request),
 		signal: requestSignal(timeoutMs, signal),

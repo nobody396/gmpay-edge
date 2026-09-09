@@ -44,6 +44,20 @@ export async function reconcilePaymentInfrastructure(
 					now,
 				),
 		});
+	for (const rail of initialPaymentRails) {
+		if (!("chainId" in rail.metadata)) continue;
+		statements.push({
+			kind: "rails",
+			statement: database
+				.prepare(
+					`UPDATE payment_rails
+					 SET metadata = json_set(COALESCE(metadata, '{}'), '$.chainId', ?),
+					 updated_at = ?
+					 WHERE code = ? AND json_extract(metadata, '$.chainId') IS NULL`,
+				)
+				.bind(rail.metadata.chainId, now, rail.code),
+		});
+	}
 	for (const asset of initialPaymentAssets)
 		statements.push({
 			kind: "assets",

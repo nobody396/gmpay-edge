@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	createPaymentConnectionInput,
+	updateChainPaymentConnectionInput,
 	updateProviderPaymentConnectionInput,
 } from "#/features/payment-settings/schema";
 
@@ -103,5 +104,18 @@ describe("payment connection input", () => {
 				}).success,
 			).toBe(false);
 		}
+	});
+
+	it("accepts a replacement API key only when updating a chain connection", () => {
+		expect(
+			updateChainPaymentConnectionInput.safeParse({
+				id: "bsc-ankr",
+				name: "BSC Ankr",
+				transport: "http",
+				endpoint: "https://rpc.ankr.com/bsc/__API_KEY__",
+				priority: 20,
+				apiKey: "encrypted-at-rest",
+			}).success,
+		).toBe(true);
 	});
 });

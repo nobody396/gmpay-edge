@@ -17,21 +17,29 @@ type ConnectionRow = {
 	contract_address: null;
 	decimals: number;
 	native_symbol: string;
+	chain_id: number | null;
 };
 
 describe("payment method adapter routing", () => {
 	it.each([
-		["tron", "tron", "TRX", "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj"],
-		["ethereum", "evm", "ETH", "0x1111111111111111111111111111111111111111"],
-		["base", "evm", "ETH", "0x1111111111111111111111111111111111111111"],
-		["bsc", "evm", "BNB", "0x1111111111111111111111111111111111111111"],
-		["polygon", "evm", "POL", "0x1111111111111111111111111111111111111111"],
-		["ton", "ton", "GRAM", `UQ${"a".repeat(46)}`],
-		["aptos", "aptos", "APT", "0x1"],
-		["solana", "solana", "SOL", "11111111111111111111111111111111"],
-	] as const)("constructs and validates the %s chain adapter from a payment-method query", async (railCode, adapterId, assetCode, address) => {
+		["tron", "tron", "TRX", "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj", null],
+		["ethereum", "evm", "ETH", "0x1111111111111111111111111111111111111111", 1],
+		["base", "evm", "ETH", "0x1111111111111111111111111111111111111111", 8453],
+		["bsc", "evm", "BNB", "0x1111111111111111111111111111111111111111", 56],
+		[
+			"polygon",
+			"evm",
+			"POL",
+			"0x1111111111111111111111111111111111111111",
+			137,
+		],
+		["xlayer", "evm", "OKB", "0x1111111111111111111111111111111111111111", 196],
+		["ton", "ton", "GRAM", `UQ${"a".repeat(46)}`, null],
+		["aptos", "aptos", "APT", "0x1", null],
+		["solana", "solana", "SOL", "11111111111111111111111111111111", null],
+	] as const)("constructs and validates the %s chain adapter from a payment-method query", async (railCode, adapterId, assetCode, address, chainId) => {
 		const [candidate] = await createPaymentMethodAdapters(
-			db([chainRow(railCode, adapterId, assetCode)]),
+			db([chainRow(railCode, adapterId, assetCode, chainId)]),
 			`method-${railCode}`,
 		);
 		if (!candidate) throw new Error(`Missing ${railCode} adapter`);
@@ -39,6 +47,10 @@ describe("payment method adapter routing", () => {
 			id: adapterId,
 			network: railCode,
 		});
+		if (adapterId === "evm")
+			expect(candidate.adapter).toMatchObject({
+				config: { expectedChainId: chainId },
+			});
 		const target = await candidate.adapter.createPaymentTarget({
 			address,
 			expiresAt: new Date(1),
@@ -145,6 +157,7 @@ function chainRow(
 	railCode: string,
 	adapter: string,
 	assetCode: string,
+	chainId: number | null = adapter === "evm" ? 1 : null,
 ): ConnectionRow {
 	return {
 		connection_id: `connection-${railCode}-http`,
@@ -159,6 +172,7 @@ function chainRow(
 		contract_address: null,
 		decimals: 18,
 		native_symbol: assetCode,
+		chain_id: chainId,
 	};
 }
 

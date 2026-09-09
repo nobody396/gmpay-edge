@@ -30,6 +30,7 @@ type MethodConnection = {
 	contract_address: string | null;
 	decimals: number;
 	native_symbol: string;
+	chain_id: number | null;
 };
 
 export const paymentAdapterCandidateLimit = 8;
@@ -96,7 +97,8 @@ export async function createPaymentMethodAdapters(
 			 pa.code AS asset_code,
 			 pa.rail_code,
 			 pa.kind AS asset_kind, pa.contract_address, pa.decimals,
-			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol
+			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol,
+			 CAST(json_extract(pr.metadata, '$.chainId') AS INTEGER) AS chain_id
 			 FROM payment_assets pa
 				 JOIN payment_rails pr ON pr.code = pa.rail_code
 				 JOIN payment_ingresses pc ON pc.rail_code = pr.code
@@ -166,7 +168,8 @@ export async function createPaymentConnectionAdapter(
 			 pc.timeout_ms, pc.block_lookback, pc.log_block_range, pc.max_scan_transactions,
 			 pa.code AS asset_code, pa.rail_code, pa.kind AS asset_kind,
 			 pa.contract_address, pa.decimals,
-			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol
+			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol,
+			 CAST(json_extract(pr.metadata, '$.chainId') AS INTEGER) AS chain_id
 				 FROM payment_ingresses pc
 				 LEFT JOIN payment_ingress_credentials credential ON credential.payment_ingress_id = pc.id
 				 JOIN payment_rails pr ON pr.code = pc.rail_code
@@ -194,7 +197,8 @@ export async function loadPaymentConnectionHealthTargets(
 			 pc.timeout_ms, pc.block_lookback, pc.log_block_range, pc.max_scan_transactions,
 			 pa.code AS asset_code, pa.rail_code, pa.kind AS asset_kind,
 			 pa.contract_address, pa.decimals,
-			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol
+			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol,
+			 CAST(json_extract(pr.metadata, '$.chainId') AS INTEGER) AS chain_id
 				 FROM payment_ingresses pc
 				 LEFT JOIN payment_ingress_credentials credential ON credential.payment_ingress_id = pc.id
 				 JOIN payment_rails pr ON pr.code = pc.rail_code
@@ -231,7 +235,8 @@ export async function loadPaymentConnectionHealthTargetsByIds(
 			 pc.timeout_ms, pc.block_lookback, pc.log_block_range, pc.max_scan_transactions,
 			 pa.code AS asset_code, pa.rail_code, pa.kind AS asset_kind,
 			 pa.contract_address, pa.decimals,
-			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol
+			 COALESCE(json_extract(pr.metadata, '$.nativeSymbol'), pa.symbol) AS native_symbol,
+			 CAST(json_extract(pr.metadata, '$.chainId') AS INTEGER) AS chain_id
 				 FROM payment_ingresses pc
 				 LEFT JOIN payment_ingress_credentials credential ON credential.payment_ingress_id = pc.id
 				 JOIN payment_rails pr ON pr.code = pc.rail_code
@@ -288,14 +293,11 @@ async function createAdapter(
 			apiUrl: endpoint,
 			apiKey,
 		}) as PaymentAdapter<unknown>;
-	if (
-		connection.adapter === "evm" &&
-		endpoint &&
-		["ethereum", "base", "bsc", "polygon"].includes(connection.rail_code)
-	)
+	if (connection.adapter === "evm" && endpoint)
 		return new EvmAdapter({
 			rpcUrl: endpoint,
 			apiKey,
+			expectedChainId: connection.chain_id ?? undefined,
 			timeoutMs: connection.timeout_ms ?? undefined,
 			blockLookback: connection.block_lookback ?? undefined,
 			logBlockRange: connection.log_block_range ?? undefined,

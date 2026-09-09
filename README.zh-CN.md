@@ -44,6 +44,7 @@ GMPay Edge 是可部署到 Cloudflare Workers 或 Bun/Nitro Docker 容器的自�
 | 链上网络 | Base | USDT、USDC、ETH |
 | 链上网络 | BNB Smart Chain / BEP20 | USDT、USDC、BNB |
 | 链上网络 | Polygon | USDT、USDC、MATIC |
+| 链上网络 | X Layer | USDT0 |
 | 链上网络 | TON | USDT、GRAM |
 | 链上网络 | Aptos | USDT、USDC |
 | 链上网络 | Solana | USDT、USDC |

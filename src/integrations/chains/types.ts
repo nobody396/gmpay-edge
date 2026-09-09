@@ -1,24 +1,12 @@
 import type { z } from "zod";
 
-export type Network =
-	| "tron"
-	| "ethereum"
-	| "base"
-	| "bsc"
-	| "polygon"
-	| "ton"
-	| "aptos"
-	| "solana"
-	| "binance"
-	| "okx"
-	| "okpay";
 export interface PaymentTarget {
 	address: string;
 	memo?: string;
 	expiresAt: Date;
 }
 export interface NormalizedTransaction {
-	network: Network;
+	network: string;
 	hash: string;
 	eventIndex: number;
 	from: string;
@@ -54,7 +42,7 @@ export type AdapterErrorKind =
 	| "permanent";
 export interface PaymentAdapter<TConfig> {
 	readonly id: string;
-	readonly network: Network;
+	readonly network: string;
 	readonly configSchema: z.ZodType<TConfig>;
 	validateConfig(value: unknown): TConfig;
 	createPaymentTarget(input: {

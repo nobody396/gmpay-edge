@@ -15,24 +15,35 @@ export const initialChainRails = [
 		name: "Ethereum",
 		family: "evm",
 		nativeSymbol: "ETH",
+		chainId: 1,
 	},
 	{
 		code: "base",
 		name: "Base",
 		family: "evm",
 		nativeSymbol: "ETH",
+		chainId: 8453,
 	},
 	{
 		code: "bsc",
 		name: "BNB Smart Chain",
 		family: "evm",
 		nativeSymbol: "BNB",
+		chainId: 56,
 	},
 	{
 		code: "polygon",
 		name: "Polygon",
 		family: "evm",
 		nativeSymbol: "MATIC",
+		chainId: 137,
+	},
+	{
+		code: "xlayer",
+		name: "X Layer",
+		family: "evm",
+		nativeSymbol: "OKB",
+		chainId: 196,
 	},
 	{
 		code: "ton",
@@ -97,6 +108,7 @@ export const initialPaymentRails = [
 		metadata: {
 			family: network.family,
 			nativeSymbol: network.nativeSymbol,
+			...("chainId" in network ? { chainId: network.chainId } : {}),
 		},
 	})),
 	...initialExchangeRails.map((exchange) => ({
@@ -150,6 +162,21 @@ export const initialChainConnections = [
 		name: "Polygon Public RPC",
 		url: "https://polygon-bor-rpc.publicnode.com",
 		enabled: true,
+	},
+	{
+		id: "rpc-xlayer-default",
+		network: "xlayer",
+		name: "X Layer RPC",
+		url: "https://rpc.xlayer.tech",
+		enabled: true,
+	},
+	{
+		id: "rpc-xlayer-secondary",
+		network: "xlayer",
+		name: "X Layer OKX RPC",
+		url: "https://xlayerrpc.okx.com",
+		enabled: true,
+		priority: 110,
 	},
 	{
 		id: "rpc-ton-default",
@@ -276,6 +303,15 @@ export const initialPaymentAssets = [
 		"0x3c499c542cef5e3811e1192ce70d8cc03d5c3359",
 		6,
 	),
+	asset(
+		"xlayer-usdt",
+		"USDT",
+		"xlayer",
+		"USDT",
+		"token",
+		"0x779ded0c9e1022225f8e0630b35a9b54be713736",
+		6,
+	),
 	asset("ton-gram", "GRAM", "ton", "GRAM", "native", null, 9),
 	asset(
 		"ton-usdt",
@@ -390,8 +426,9 @@ export const initialExchangeRates = [
 ] as const;
 
 function confirmationsForRail(rail: string) {
-	if (rail === "tron") return 20;
-	if (["ethereum", "base", "bsc", "polygon"].includes(rail)) return 12;
+	const chain = initialChainRails.find((candidate) => candidate.code === rail);
+	if (chain?.family === "tron") return 20;
+	if (chain?.family === "evm") return 12;
 	return 1;
 }
 

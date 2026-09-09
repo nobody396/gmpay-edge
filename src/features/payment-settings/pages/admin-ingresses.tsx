@@ -91,6 +91,9 @@ export function PaymentIngressesPage() {
 	const page = useQuery(paymentIngressesQueryOptions);
 	const rows = page.data?.ingresses ?? [];
 	const rails = page.data?.rails ?? [];
+	const newConnectionIsEvm = rails.some(
+		(rail) => rail.code === newConnectionRailCode && rail.adapter === "evm",
+	);
 	const refresh = () =>
 		client.invalidateQueries({ queryKey: ["admin", "payment-ingresses"] });
 	const toggle = useMutation({
@@ -365,7 +368,7 @@ export function PaymentIngressesPage() {
 											render: (field) => (
 												<NewConnectionTransportFields
 													field={field}
-													showEvmScanConfig={isEvmRail(newConnectionRailCode)}
+													showEvmScanConfig={newConnectionIsEvm}
 												/>
 											),
 										},
@@ -382,7 +385,7 @@ export function PaymentIngressesPage() {
 													| "websocket",
 												endpoint: String(values.endpoint ?? ""),
 												priority: Number(values.priority ?? 100),
-												...(isEvmRail(String(values.railCode ?? ""))
+												...(newConnectionIsEvm
 													? evmScanConfigValues(values)
 													: {}),
 											},
@@ -542,6 +545,14 @@ function ChainConnectionForm({
 			schema={[
 				{ name: "name", label: m.common_name(), required: true },
 				{
+					name: "apiKey",
+					label: m.infrastructure_provider_api_key(),
+					valueType: "password",
+					description: connection.has_api_key
+						? m.settings_secret_configured()
+						: undefined,
+				},
+				{
 					name: "transport",
 					label: m.infrastructure_transport(),
 					valueType: "select",
@@ -565,14 +576,16 @@ function ChainConnectionForm({
 					required: true,
 					fieldProps: { type: "number", min: 0, max: 10000 },
 				},
-				...(isEvmRail(connection.rail_code) ? evmScanConfigSchemaFields() : []),
+				...(connection.rail_adapter === "evm"
+					? evmScanConfigSchemaFields()
+					: []),
 			]}
 			initialValues={{
 				name: connection.name,
 				transport: connection.transport,
 				endpoint: connection.endpoint ?? "",
 				priority: connection.priority,
-				...(isEvmRail(connection.rail_code)
+				...(connection.rail_adapter === "evm"
 					? {
 							timeoutMs: connection.timeout_ms ?? 30_000,
 							blockLookback: connection.block_lookback ?? 3000,
@@ -591,7 +604,8 @@ function ChainConnectionForm({
 							| "websocket",
 						endpoint: String(values.endpoint ?? ""),
 						priority: Number(values.priority ?? 100),
-						...(isEvmRail(connection.rail_code)
+						apiKey: String(values.apiKey ?? "").trim() || undefined,
+						...(connection.rail_adapter === "evm"
 							? evmScanConfigValues(values)
 							: {}),
 					},
@@ -661,10 +675,6 @@ function evmScanConfigValues(values: Record<string, unknown>) {
 		logBlockRange: Number(values.logBlockRange ?? 500),
 		maxScanTransactions: Number(values.maxScanTransactions ?? 1000),
 	};
-}
-
-function isEvmRail(railCode: string) {
-	return ["ethereum", "base", "bsc", "polygon"].includes(railCode);
 }
 
 function ProviderConfigurationForm({

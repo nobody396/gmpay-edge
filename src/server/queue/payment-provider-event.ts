@@ -338,7 +338,7 @@ function providerTriggerMatchesTransaction(
 		transaction.network === network &&
 		transaction.hash.toLowerCase() === trigger.transactionHash.toLowerCase() &&
 		transaction.eventIndex === trigger.eventIndex &&
-		paymentTargetAddressMatches(network, transaction.to, trigger.toAddress) &&
+		paymentTargetAddressMatches(transaction.to, trigger.toAddress) &&
 		transaction.assetCode.toUpperCase() === trigger.assetCode.toUpperCase()
 	);
 }

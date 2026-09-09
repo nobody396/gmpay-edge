@@ -17,6 +17,7 @@ describe("payment infrastructure catalog", () => {
 			base: ["ETH", "USDT", "USDC"],
 			bsc: ["BNB", "USDT", "USDC"],
 			polygon: ["MATIC", "USDT", "USDC"],
+			xlayer: ["USDT"],
 			ton: ["GRAM", "USDT"],
 			aptos: ["USDT", "USDC"],
 			solana: ["USDT", "USDC"],
@@ -39,6 +40,38 @@ describe("payment infrastructure catalog", () => {
 			))
 				expect(asset.defaultConfirmations).toBeGreaterThan(0);
 		}
+	});
+
+	it("pins X Layer to the current mainnet and USDT0 contract", () => {
+		expect(
+			initialPaymentRails.find((rail) => rail.code === "xlayer"),
+		).toMatchObject({
+			adapter: "evm",
+			metadata: { chainId: 196, nativeSymbol: "OKB" },
+		});
+		expect(
+			initialPaymentAssets.find((asset) => asset.id === "xlayer-usdt"),
+		).toMatchObject({
+			code: "USDT",
+			contractAddress: "0x779ded0c9e1022225f8e0630b35a9b54be713736",
+			decimals: 6,
+			defaultConfirmations: 12,
+		});
+		expect(
+			initialPaymentConnections.filter(
+				(connection) =>
+					connection.type === "rpc" && connection.railCode === "xlayer",
+			),
+		).toEqual([
+			expect.objectContaining({
+				endpoint: "https://rpc.xlayer.tech",
+				enabled: true,
+			}),
+			expect.objectContaining({
+				endpoint: "https://xlayerrpc.okx.com",
+				enabled: true,
+			}),
+		]);
 	});
 
 	it("registers provider rails and keeps their connections enabled by default", () => {
