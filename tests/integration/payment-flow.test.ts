@@ -58,6 +58,25 @@ describe("D1 payment processing flow", () => {
 		);
 		expect(duplicate).toEqual({ duplicate: true, status: "paid" });
 
+		const paidBefore = await db
+			.prepare("SELECT paid_at, version FROM orders WHERE id = ?")
+			.bind("order-1")
+			.first<{ paid_at: number; version: number }>();
+		// Later scans only see a deeper confirmation count; that is not a new
+		// state, so it must neither refresh paid_at nor emit another webhook.
+		const deeper = await recordPaymentTransaction(
+			env,
+			"order-1",
+			transaction({ confirmations: 50_000 }),
+		);
+		expect(deeper).toEqual({ duplicate: true, status: "paid" });
+		await expect(
+			db
+				.prepare("SELECT paid_at, version FROM orders WHERE id = ?")
+				.bind("order-1")
+				.first(),
+		).resolves.toEqual(paidBefore);
+
 		const reorged = await recordPaymentTransaction(
 			env,
 			"order-1",

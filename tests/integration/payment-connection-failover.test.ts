@@ -135,6 +135,59 @@ describe("payment connection failover", () => {
 		]);
 	});
 
+	it("keeps a throttled connection routable while failing over", async () => {
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		vi.spyOn(console, "info").mockImplementation(() => undefined);
+		await db
+			.prepare(
+				"UPDATE payment_ingresses SET health_status = 'healthy', last_error_code = NULL",
+			)
+			.run();
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("primary"))
+					return new Response("slow down", { status: 429 });
+				const request = JSON.parse(String(init?.body)) as { method: string };
+				if (request.method === "eth_blockNumber") return rpc("0xa");
+				if (request.method === "eth_getBlockByNumber")
+					return rpc({
+						hash: "0xblock",
+						number: "0xa",
+						timestamp: "0x6553f100",
+						transactions: [],
+					});
+				throw new Error(`Unexpected RPC method ${request.method}`);
+			}),
+		);
+		let acknowledged = false;
+		await handlePaymentScan(
+			{
+				body: {
+					kind: "payment.scan",
+					version: 1,
+					receivingMethodId: "asset-eth",
+					orderId: "order-eth",
+				},
+				ack: () => {
+					acknowledged = true;
+				},
+				retry: () => undefined,
+			} as unknown as Message<
+				import("#/features/payments/types").PaymentScanMessage
+			>,
+			{ DB: db } as Env,
+		);
+		expect(acknowledged).toBe(true);
+		const primary = await db
+			.prepare(
+				"SELECT health_status FROM payment_ingresses WHERE id = 'connection-primary'",
+			)
+			.first<{ health_status: string }>();
+		expect(primary?.health_status).toBe("healthy");
+	});
+
 	it("does not attribute a downstream D1 failure to the provider or fail over", async () => {
 		vi.spyOn(Math, "random").mockReturnValue(0);
 		await db
