@@ -393,6 +393,40 @@ describe("EVM adapter", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 	});
 
+	it("treats throttling inside a JSON-RPC body as a rate limit without splitting", async () => {
+		const fetchMock = vi
+			.fn()
+			.mockResolvedValueOnce(rpc("0x3e8"))
+			.mockResolvedValueOnce(
+				Response.json({
+					jsonrpc: "2.0",
+					id: 1,
+					error: {
+						code: -32_005,
+						message: "Rate limit exceeded. To obtain higher limits...",
+					},
+				}),
+			);
+		vi.stubGlobal("fetch", fetchMock);
+		const evm = new EvmAdapter({
+			rpcUrl: "https://rpc.example",
+			network: "ethereum",
+			expectedChainId: 1,
+			nativeAsset: "ETH",
+			logBlockRange: 1000,
+			tokens: { USDT: { address: usdt, decimals: 6 } },
+		});
+		const error = await evm
+			.findTransactions({
+				address: recipient,
+				assetCode: "USDT",
+				sinceBlock: 1n,
+			})
+			.catch((caught: unknown) => caught);
+		expect(evm.classifyError(error)).toBe("rate_limit");
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+	});
+
 	it("clamps a stale scan cursor to the configured lookback", async () => {
 		const fetchMock = vi
 			.fn()
