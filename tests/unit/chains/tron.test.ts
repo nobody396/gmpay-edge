@@ -484,6 +484,120 @@ describe("TRON adapters", () => {
 		).toHaveLength(2);
 	});
 
+	it("scans a node JSON-RPC endpoint without TronGrid account indexes", async () => {
+		const usdt = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+		const usdtHex = "a614f803b6fd780986a42c78ec9c7f77e6ded13c";
+		const targetTopic =
+			"000000000000000000000000ea51342dabbb928ae1e576bd39eff8aaf070a8c6";
+		const fromTopic =
+			"0000000000000000000000000000000000000000000000000000000000000000";
+		const transfer =
+			"ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+		const ranges: [number, number][] = [];
+		const requested: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				requested.push(url);
+				if (url === "https://tron.example/wallet/getnowblock")
+					return jsonResponse(nowBlock(110));
+				if (url === "https://tron.example/jsonrpc") {
+					const body = JSON.parse(String(init?.body)) as {
+						params: [{ fromBlock: string; toBlock: string; topics: string[] }];
+					};
+					const [filter] = body.params;
+					const range: [number, number] = [
+						Number(filter.fromBlock),
+						Number(filter.toBlock),
+					];
+					// The node rejects wide ranges; the scan must split them.
+					if (range[1] - range[0] >= 5)
+						return jsonResponse({ error: { message: "range too large" } });
+					ranges.push(range);
+					expect(filter.topics[2]).toBe(`0x${targetTopic}`);
+					return jsonResponse({
+						result:
+							range[0] <= 105 && 105 <= range[1]
+								? [
+										{ blockNumber: "0x69", transactionHash: "0xAB12" },
+										{ blockNumber: "0x69", transactionHash: "0xab12" },
+									]
+								: [],
+					});
+				}
+				if (url === "https://tron.example/wallet/gettransactioninfobyid") {
+					return jsonResponse({
+						id: "ab12",
+						blockNumber: 105,
+						blockTimeStamp: 1_700_000_000_000,
+						receipt: { result: "SUCCESS" },
+						log: [
+							{
+								address: "1111111111111111111111111111111111111111",
+								topics: [transfer, fromTopic, targetTopic],
+								data: "01",
+							},
+							{
+								address: usdtHex,
+								topics: [transfer, fromTopic, targetTopic],
+								data: "0f4240",
+							},
+						],
+					});
+				}
+				if (url === "https://tron.example/wallet/getblockbynum")
+					return jsonResponse(block(105, "block-105"));
+				throw new Error(`Unexpected TRON request ${url}`);
+			}),
+		);
+		const adapter = new TronAdapter({
+			apiUrl: "https://tron.example/jsonrpc",
+			blockLookback: 11,
+			logBlockRange: 20,
+			tokens: { USDT: { contract: usdt, decimals: 6 } },
+		});
+		const transactions = await adapter.findTransactions({
+			address,
+			assetCode: "USDT",
+			sinceBlock: 102n,
+		});
+		expect(transactions).toEqual([
+			expect.objectContaining({
+				hash: "ab12",
+				eventIndex: 1,
+				from: zeroAddress,
+				to: address,
+				amountUnits: 1_000_000n,
+				blockNumber: 105n,
+				blockHash: "block-105",
+				confirmations: 6,
+				timestamp: new Date(1_700_000_000_000),
+				success: true,
+			}),
+		]);
+		expect(ranges[0]?.[0]).toBe(102);
+		expect(ranges.at(-1)?.[1]).toBe(110);
+		expect(
+			requested.filter((url) => url.endsWith("/gettransactioninfobyid")),
+		).toHaveLength(1);
+		expect(requested.some((url) => url.includes("/v1/"))).toBe(false);
+		await expect(
+			adapter.getTransaction("ab12", {
+				address,
+				assetCode: "USDT",
+				eventIndex: 0,
+			}),
+		).resolves.toBeNull();
+		await expect(
+			adapter.getTransaction("ab12", {
+				address,
+				assetCode: "USDT",
+				eventIndex: 1,
+			}),
+		).resolves.toMatchObject({ amountUnits: 1_000_000n, eventIndex: 1 });
+	});
+
 	it("redacts unexpected provider failures from health details", async () => {
 		vi.stubGlobal(
 			"fetch",

@@ -21,6 +21,9 @@ const configSchema = z.object({
 	maxPages: z.number().int().min(1).max(500).default(50),
 	maxConcurrentRequests: z.number().int().min(1).max(10).default(3),
 	maxScanTransactions: z.number().int().min(1).max(10_000).default(1000),
+	// Only used when apiUrl is a node's `/jsonrpc` endpoint: ~1 hour of blocks.
+	blockLookback: z.number().int().min(1).max(20_000).default(1200),
+	logBlockRange: z.number().int().min(1).max(20_000).default(1000),
 	tokens: z
 		.record(
 			z.string(),
@@ -57,7 +60,24 @@ const trc20TransferSchema = z.object({
 const transactionInfoSchema = z.looseObject({
 	id: z.string().optional(),
 	blockNumber: z.number().optional(),
+	blockTimeStamp: z.number().optional(),
 	receipt: z.looseObject({ result: z.string().optional() }).optional(),
+	log: z
+		.array(
+			z.looseObject({
+				address: z.string().optional(),
+				topics: z.array(z.string()).default([]),
+				data: z.string().optional(),
+			}),
+		)
+		.default([]),
+});
+const transferTopic =
+	"ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+const logSchema = z.object({
+	blockNumber: z.string(),
+	transactionHash: z.string(),
+	removed: z.boolean().optional(),
 });
 type ResolvedTrc20Transfer = z.infer<typeof trc20TransferSchema> & {
 	block_number: number;
@@ -93,7 +113,12 @@ const trxTransactionSchema = z.object({
 });
 const nowBlockSchema = z.object({
 	blockID: z.string(),
-	block_header: z.object({ raw_data: z.object({ number: z.number() }) }),
+	block_header: z.object({
+		raw_data: z.object({
+			number: z.number(),
+			timestamp: z.number().optional(),
+		}),
+	}),
 });
 
 export class TronAdapter implements PaymentAdapter<TronConfig> {
@@ -170,6 +195,25 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 			counters,
 		);
 		const wantsNative = lookup?.assetCode?.toUpperCase() === "TRX";
+		if (this.logScan && !wantsNative) {
+			const contract = this.tokenContract(lookup?.assetCode);
+			if (!contract || !lookup?.assetCode) return null;
+			const transfer = receiptTransfers(parsedInfo, contract).find(
+				(candidate) =>
+					(lookup.address == null || candidate.to === lookup.address) &&
+					(lookup.eventIndex == null ||
+						candidate.eventIndex === lookup.eventIndex),
+			);
+			if (!transfer) return null;
+			return this.normalizeReceiptTransfer(
+				hash,
+				parsedInfo,
+				transfer,
+				lookup.assetCode,
+				current,
+				blockHash,
+			);
+		}
 		const eventEnvelope = wantsNative
 			? { data: [] }
 			: envelopeSchema.parse(
@@ -268,6 +312,16 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 		const deadlineAt = operationDeadline(this.config.timeoutMs);
 		const current = await this.currentBlock(deadlineAt, counters);
 		const contract = this.tokenContract(input.assetCode);
+		if (this.logScan) {
+			if (!contract) throw new TronConfigurationError();
+			return this.findTransferLogs(
+				input,
+				contract,
+				current,
+				deadlineAt,
+				counters,
+			);
+		}
 		const path =
 			input.assetCode.toUpperCase() === "TRX"
 				? `/v1/accounts/${input.address}/transactions?only_to=true&limit=200&order_by=block_timestamp,desc`
@@ -336,6 +390,157 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 				(input.sinceBlock == null ||
 					transaction.blockNumber >= input.sinceBlock),
 		);
+	}
+	// A node `/jsonrpc` endpoint needs no TronGrid key: transfers come from
+	// eth_getLogs and receipts from the node HTTP API next to it.
+	private get logScan() {
+		return /\/jsonrpc\/?$/.test(this.config.apiUrl);
+	}
+	private get nodeUrl() {
+		return this.config.apiUrl.replace(/\/$/, "").replace(/\/jsonrpc$/, "");
+	}
+	private async findTransferLogs(
+		input: { address: string; assetCode: string; sinceBlock?: bigint },
+		contract: string,
+		current: { number: number },
+		deadlineAt: number,
+		counters: ProviderOperationCounters,
+	): Promise<NormalizedTransaction[]> {
+		const latest = current.number;
+		if (input.sinceBlock != null && input.sinceBlock > BigInt(latest))
+			return [];
+		const earliest = Math.max(0, latest - this.config.blockLookback + 1);
+		const from =
+			input.sinceBlock == null
+				? earliest
+				: Math.max(earliest, Number(input.sinceBlock));
+		const hashes = new Set<string>();
+		let rangeStart = from;
+		let blockRange = this.config.logBlockRange;
+		while (rangeStart <= latest) {
+			counters.page();
+			const rangeEnd = Math.min(latest, rangeStart + blockRange - 1);
+			let raw: unknown;
+			try {
+				raw = await this.jsonRpc(
+					"eth_getLogs",
+					[
+						{
+							address: `0x${tronBase58ToHex(contract).slice(2)}`,
+							fromBlock: `0x${rangeStart.toString(16)}`,
+							toBlock: `0x${rangeEnd.toString(16)}`,
+							topics: [
+								`0x${transferTopic}`,
+								null,
+								`0x${tronBase58ToHex(input.address).slice(2).padStart(64, "0")}`,
+							],
+						},
+					],
+					deadlineAt,
+					counters,
+				);
+			} catch (error) {
+				if (blockRange > 1 && error instanceof TronRpcError) {
+					blockRange = Math.max(1, Math.floor(blockRange / 2));
+					continue;
+				}
+				throw error;
+			}
+			for (const row of z.array(logSchema).parse(raw)) {
+				if (row.removed) continue;
+				hashes.add(row.transactionHash.replace(/^0x/i, "").toLowerCase());
+			}
+			if (hashes.size > this.config.maxScanTransactions)
+				throw new Error("TRON scan exceeded the configured row limit");
+			rangeStart = rangeEnd + 1;
+		}
+		const blockHashes = new Map<number, Promise<string>>();
+		const perTransaction = await mapConcurrently(
+			[...hashes],
+			this.config.maxConcurrentRequests,
+			async (hash) => {
+				const info = transactionInfoSchema.parse(
+					await this.request(
+						"/wallet/gettransactioninfobyid",
+						{ method: "POST", body: JSON.stringify({ value: hash }) },
+						deadlineAt,
+						counters,
+					),
+				);
+				const blockNumber = info.blockNumber;
+				if (blockNumber == null) return [];
+				const transfers = receiptTransfers(info, contract).filter(
+					(transfer) => transfer.to === input.address,
+				);
+				if (!transfers.length) return [];
+				let blockHash = blockHashes.get(blockNumber);
+				if (!blockHash) {
+					blockHash = this.blockHash(blockNumber, deadlineAt, counters);
+					blockHashes.set(blockNumber, blockHash);
+				}
+				const resolvedHash = await blockHash;
+				return transfers.map((transfer) =>
+					this.normalizeReceiptTransfer(
+						hash,
+						info,
+						transfer,
+						input.assetCode,
+						current,
+						resolvedHash,
+					),
+				);
+			},
+		);
+		return perTransaction.flat();
+	}
+	private normalizeReceiptTransfer(
+		hash: string,
+		info: z.infer<typeof transactionInfoSchema>,
+		transfer: ReceiptTransfer,
+		assetCode: string,
+		current: { number: number },
+		blockHash: string,
+	): NormalizedTransaction {
+		const blockNumber = info.blockNumber ?? 0;
+		return {
+			network: "tron",
+			hash,
+			eventIndex: transfer.eventIndex,
+			from: transfer.from,
+			to: transfer.to,
+			assetCode: assetCode.toUpperCase(),
+			amountUnits: transfer.amountUnits,
+			blockNumber: BigInt(blockNumber),
+			blockHash,
+			confirmations: confirmations(current.number, blockNumber),
+			timestamp: new Date(info.blockTimeStamp ?? 0),
+			success:
+				info.receipt?.result == null || info.receipt.result === "SUCCESS",
+			canonical: true,
+		};
+	}
+	private async jsonRpc(
+		method: string,
+		params: unknown[],
+		deadlineAt: number,
+		counters: ProviderOperationCounters,
+	) {
+		counters.request();
+		const response = await fetch(this.config.apiUrl, {
+			method: "POST",
+			signal: operationSignal(deadlineAt, "TRON operation"),
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+		});
+		if (!response.ok) throw new TronHttpError(response.status);
+		const body = z
+			.object({
+				result: z.unknown().optional(),
+				error: z.object({ message: z.string().optional() }).optional(),
+			})
+			.parse(await response.json());
+		if (body.error) throw new TronRpcError();
+		return body.result;
 	}
 	private tokenContract(assetCode: string | undefined) {
 		if (!assetCode) return undefined;
@@ -481,7 +686,9 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 			if (error.status >= 500) return "network";
 			return "permanent";
 		}
-		if (error instanceof z.ZodError) return "invalid_response";
+		if (error instanceof z.ZodError || error instanceof TronRpcError)
+			return "invalid_response";
+		if (error instanceof TronConfigurationError) return "configuration";
 		if (error instanceof TypeError || error instanceof DOMException)
 			return "network";
 		return "permanent";
@@ -533,20 +740,17 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 		counters?: ProviderOperationCounters,
 	): Promise<T> {
 		counters?.request();
-		const response = await fetch(
-			`${this.config.apiUrl.replace(/\/$/, "")}${path}`,
-			{
-				...init,
-				signal: operationSignal(deadlineAt, "TRON operation"),
-				headers: {
-					"content-type": "application/json",
-					...(this.config.apiKey
-						? { "TRON-PRO-API-KEY": this.config.apiKey }
-						: {}),
-					...init?.headers,
-				},
+		const response = await fetch(`${this.nodeUrl}${path}`, {
+			...init,
+			signal: operationSignal(deadlineAt, "TRON operation"),
+			headers: {
+				"content-type": "application/json",
+				...(this.config.apiKey
+					? { "TRON-PRO-API-KEY": this.config.apiKey }
+					: {}),
+				...init?.headers,
 			},
-		);
+		});
 		if (!response.ok) throw new TronHttpError(response.status);
 		return (await response.json()) as T;
 	}
@@ -658,6 +862,51 @@ async function mapConcurrently<T, R>(
 	return results;
 }
 
+class TronRpcError extends Error {
+	constructor() {
+		super("TRON JSON-RPC returned an error");
+	}
+}
+class TronConfigurationError extends Error {
+	constructor() {
+		super("TRON log scanning needs a configured token contract");
+	}
+}
+type ReceiptTransfer = {
+	eventIndex: number;
+	from: string;
+	to: string;
+	amountUnits: bigint;
+};
+// Event index is the log position inside the transaction, matching the
+// TronGrid event_index already stored for earlier payments.
+function receiptTransfers(
+	info: z.infer<typeof transactionInfoSchema>,
+	contract: string,
+): ReceiptTransfer[] {
+	const contractHex = tronBase58ToHex(contract).slice(2);
+	const transfers: ReceiptTransfer[] = [];
+	info.log.forEach((log, eventIndex) => {
+		const [topic, from, to] = log.topics.map((value) =>
+			value.replace(/^0x/i, "").toLowerCase(),
+		);
+		if (
+			log.address?.replace(/^(0x|41)/i, "").toLowerCase() !== contractHex ||
+			topic !== transferTopic ||
+			!from ||
+			!to ||
+			!log.data
+		)
+			return;
+		transfers.push({
+			eventIndex,
+			from: normalizeTronEventAddress(from),
+			to: normalizeTronEventAddress(to),
+			amountUnits: BigInt(`0x${log.data.replace(/^0x/i, "") || "0"}`),
+		});
+	});
+	return transfers;
+}
 class TronHttpError extends Error {
 	constructor(readonly status: number) {
 		super(`TRON API returned HTTP ${status}`);
@@ -701,6 +950,20 @@ function normalizeTronEventAddress(value: string) {
 	if (!/^[0-9a-f]+$/i.test(hex) || hex.length < 40)
 		throw new Error("Invalid TRON event address");
 	return tronHexToBase58(`41${hex.slice(-40)}`);
+}
+function tronBase58ToHex(address: string) {
+	const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+	let value = 0n;
+	for (const character of address) {
+		const digit = alphabet.indexOf(character);
+		if (digit < 0) throw new Error("Invalid TRON address");
+		value = value * 58n + BigInt(digit);
+	}
+	// 21 payload bytes + 4 checksum bytes; the payload keeps the 0x41 prefix.
+	const hex = value.toString(16).padStart(50, "0");
+	if (hex.length !== 50 || !hex.startsWith("41"))
+		throw new Error("Invalid TRON address");
+	return hex.slice(0, 42).toLowerCase();
 }
 function base58Encode(bytes: Uint8Array) {
 	const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
