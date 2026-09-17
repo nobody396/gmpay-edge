@@ -105,6 +105,7 @@ export async function submitCheckoutTransaction(
 			env.DB,
 			matchedTransaction,
 			orderId,
+			allowLate,
 		);
 		if (attribution.orderId !== orderId) return { status: "mismatch" };
 	} catch (error) {

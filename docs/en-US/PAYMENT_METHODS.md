@@ -371,3 +371,28 @@ Exchange and wallet credentials are encrypted with their receiving method; provi
 ## Live platform validation
 
 The automated quality gates use sanitized fixtures and never require network credentials, external accounts, or live funds. The chain, exchange, wallet, and Telegram smoke suites are retained as manually inspectable assets but are unconditionally skipped; environment variables cannot enable them. Production validation remains an explicit operator-run acceptance activity and is not reported as automated evidence.
+
+### Shared-address payment attribution and review
+
+An already-recorded transfer keeps its original order. Unrecorded transfers cannot
+belong to orders created after the transfer. Exact remaining amounts still match
+retained collision locks (including late payments). For non-exact amounts, a unique
+unpaid checkout window containing the chain timestamp takes precedence over expired
+historical locks. Concurrent eligible windows remain ambiguous: the scan's order ID
+is never a tie-breaker. Late accounting continues to follow the configured policy.
+
+Before a scan acknowledges an ambiguous or unmatched transfer, it atomically saves
+the transaction in `blockchain_transactions` and a deduplicated
+`payment.attribution_review_required` audit event. Persistence failure fails the
+scan before cursor advancement. These records are evidence, not payment acceptance:
+there is no order credit, success callback, or delivery. Operators can search that
+action under Admin → Audit logs for the transaction ID; the audit export includes
+the reason.
+Repeated scans do not multiply records or overwrite previously accounted transfers.
+
+A payer review in `pending` or `rejected` state holds its transaction out of
+automatic settlement, even if the late-payment policy is `accept`. Only the
+permission-checked review resolution path may bypass this hold. Do not approve or
+replay an order already being fulfilled separately; reconcile that alternate
+fulfillment first. No notification or customer-delivery success is implied by an
+audit record.

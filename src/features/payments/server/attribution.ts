@@ -7,6 +7,8 @@ type AttributionCandidate = {
 	order_id: string;
 	expected_amount_units: string;
 	received_amount_units: string;
+	created_at: number;
+	expires_at: number;
 };
 
 function isEvmAddress(value: string) {
@@ -19,12 +21,8 @@ export type PaymentAttribution = {
 };
 
 export class PaymentAttributionAmbiguousError extends DomainError {
-	constructor() {
-		super(
-			"payment_attribution_ambiguous",
-			409,
-			"Transaction cannot be attributed to one payment order",
-		);
+	constructor(code = "payment_attribution_ambiguous") {
+		super(code, 409, "Transaction cannot be attributed to one payment order");
 		this.name = "PaymentAttributionAmbiguousError";
 	}
 }
@@ -50,6 +48,7 @@ export async function resolvePaymentTransactionOrder(
 	db: D1Database,
 	transaction: NormalizedTransaction,
 	preferredOrderId?: string,
+	allowReviewed = false,
 ): Promise<PaymentAttribution> {
 	const existing = await db
 		.prepare(
@@ -57,7 +56,20 @@ export async function resolvePaymentTransactionOrder(
 		)
 		.bind(paymentTransactionId(transaction))
 		.first<{ order_id: string }>();
-	if (existing) return { orderId: existing.order_id, alreadyAttributed: true };
+	const result = async (orderId: string, alreadyAttributed: boolean) => {
+		if (!allowReviewed) {
+			const review = await db
+				.prepare(`SELECT 1 FROM payment_reviews WHERE order_id = ?
+			 AND status IN ('pending','rejected')
+			 AND (transaction_hash IS NULL OR lower(transaction_hash) = lower(?)) LIMIT 1`)
+				.bind(orderId, transaction.hash)
+				.first();
+			if (review)
+				throw new PaymentAttributionAmbiguousError("payment_review_pending");
+		}
+		return { orderId, alreadyAttributed };
+	};
+	if (existing) return result(existing.order_id, true);
 
 	const caseInsensitiveTarget = isEvmAddress(transaction.to);
 	const targetPredicate = caseInsensitiveTarget
@@ -69,7 +81,7 @@ export async function resolvePaymentTransactionOrder(
 	const candidates = await db
 		.prepare(
 			`SELECT DISTINCT o.id AS order_id, o.received_amount_units,
-			 ops.expected_amount_units
+			 ops.expected_amount_units, o.created_at, o.expires_at
 			 FROM order_payment_snapshots ops INDEXED BY ${targetIndex}
 			 JOIN orders o ON o.id = ops.order_id
 			 LEFT JOIN receiving_method_locks lock
@@ -102,7 +114,14 @@ export async function resolvePaymentTransactionOrder(
 	if (candidates.results.length === 101)
 		throw new PaymentAttributionAmbiguousError();
 
-	const exact = candidates.results.filter((candidate) => {
+	// EVM block timestamps have second precision. Preserve same-second checkouts,
+	// but never let a later checkout claim an earlier transfer.
+	const observedSecondEnd =
+		Math.floor(transaction.timestamp.getTime() / 1000) * 1000 + 999;
+	const eligible = candidates.results.filter(
+		(candidate) => candidate.created_at <= observedSecondEnd,
+	);
+	const exact = eligible.filter((candidate) => {
 		const remainingUnits =
 			BigInt(candidate.expected_amount_units) -
 			BigInt(candidate.received_amount_units);
@@ -110,16 +129,24 @@ export async function resolvePaymentTransactionOrder(
 	});
 	if (exact.length > 1) throw new PaymentAttributionAmbiguousError();
 	const [exactCandidate] = exact;
-	if (exactCandidate)
-		return { orderId: exactCandidate.order_id, alreadyAttributed: false };
-	const [onlyCandidate] = candidates.results;
-	if (onlyCandidate && candidates.results.length === 1)
-		return {
-			orderId: onlyCandidate.order_id,
-			alreadyAttributed: false,
-		};
-	if (candidates.results.length > 1)
+	if (exactCandidate) return result(exactCandidate.order_id, false);
+	// Retained collision locks protect exact late payments, not non-exact payments
+	// made in a different checkout window. Never use the scanning order as a tie-break.
+	const onTime = eligible.filter(
+		(candidate) =>
+			transaction.timestamp.getTime() <= candidate.expires_at &&
+			BigInt(candidate.received_amount_units) <
+				BigInt(candidate.expected_amount_units),
+	);
+	const [onTimeCandidate] = onTime;
+	if (onTimeCandidate && onTime.length === 1)
+		return result(onTimeCandidate.order_id, false);
+	if (onTime.length > 1 || eligible.length > 1)
 		throw new PaymentAttributionAmbiguousError();
+	// A sole late candidate is safe to pass to the existing late-payment policy.
+	const [onlyCandidate] = eligible;
+	if (onlyCandidate && eligible.length === 1)
+		return result(onlyCandidate.order_id, false);
 	throw new PaymentAttributionNotFoundError();
 }
 
