@@ -145,9 +145,16 @@ export async function recordPaymentTransaction(
 				: paymentStatus === "confirmed"
 					? "confirmed"
 					: "pending";
+	// Confirmations keep growing after finality; once both observations are past
+	// the requirement, a higher count is not a new payment state.
+	const sameConfirmationState =
+		existingPayment?.confirmations === transaction.confirmations ||
+		(existingPayment !== null &&
+			existingPayment.confirmations >= order.required_confirmations &&
+			transaction.confirmations >= order.required_confirmations);
 	if (
 		existingPayment &&
-		existingPayment.confirmations === transaction.confirmations &&
+		sameConfirmationState &&
 		existingPayment.status === paymentStatus &&
 		existingPayment.block_hash === transaction.blockHash &&
 		existingPayment.blockchain_status === blockchainStatus
@@ -274,15 +281,15 @@ export async function recordPaymentTransaction(
 					now,
 				),
 		env.DB.prepare(
-			`UPDATE orders SET status = ?, received_amount_units = ?, paid_at = ?,
+			`UPDATE orders SET status = ?, received_amount_units = ?,
+			 paid_at = CASE WHEN ? = 1 THEN COALESCE(paid_at, ?) ELSE NULL END,
 			 version = version + 1, updated_at = ? WHERE id = ? AND version = ?
 			 AND EXISTS (SELECT 1 FROM order_payments WHERE id = ? AND order_id = ?)`,
 		).bind(
 			aggregate.status,
 			aggregate.receivedUnits.toString(),
-			aggregate.status === "paid" || aggregate.status === "overpaid"
-				? now
-				: null,
+			aggregate.status === "paid" || aggregate.status === "overpaid" ? 1 : 0,
+			now,
 			now,
 			orderId,
 			order.version,

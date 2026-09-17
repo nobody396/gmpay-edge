@@ -292,6 +292,7 @@ async function createAdapter(
 		return new TronAdapter({
 			apiUrl: endpoint,
 			apiKey,
+			tokens: tokenConfiguration(connection, "contract"),
 		}) as PaymentAdapter<unknown>;
 	if (connection.adapter === "evm" && endpoint)
 		return new EvmAdapter({
@@ -370,7 +371,7 @@ function nativeAsset(connection: MethodConnection) {
 
 function tokenConfiguration(
 	connection: MethodConnection,
-	field: "address" | "master",
+	field: "address" | "master" | "contract",
 ) {
 	return connection.asset_kind === "token" && connection.contract_address
 		? {

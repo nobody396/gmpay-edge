@@ -117,7 +117,9 @@ export async function handlePaymentScan(
 					durationMs: providerOperationDurationMs(startedAt),
 					failoverCount,
 				});
-			if (candidate.connectionId)
+			// Throttling is transient; hiding the whole network from checkout for
+			// it turns one busy provider into a lost payment route.
+			if (candidate.connectionId && kind !== "rate_limit")
 				await updateConnectionHealth(
 					env.DB,
 					candidate.connectionId,

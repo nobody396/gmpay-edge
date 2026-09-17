@@ -422,6 +422,68 @@ describe("TRON adapters", () => {
 		);
 	});
 
+	it("resolves missing TronGrid block numbers from receipts and ignores look-alike tokens", async () => {
+		const usdt = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t";
+		const requested: string[] = [];
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				requested.push(url);
+				if (url.endsWith("/wallet/getnowblock"))
+					return jsonResponse(nowBlock(110));
+				if (url.includes("/transactions/trc20?")) {
+					const { block_number: _new, ...fresh } = trc20("new", 0, "5");
+					const { block_number: _old, ...stale } = trc20("old", 0, "6");
+					const { block_number: _fake, ...fake } = trc20("fake", 0, "7");
+					return jsonResponse({
+						data: [
+							{ ...fresh, token_info: { symbol: "USDT", address: usdt } },
+							{
+								...fake,
+								token_info: { symbol: "USDT", address: zeroAddress },
+							},
+							{ ...stale, token_info: { symbol: "USDT", address: usdt } },
+						],
+					});
+				}
+				if (url.endsWith("/wallet/gettransactioninfobyid")) {
+					const { value } = JSON.parse(String(init?.body)) as {
+						value: string;
+					};
+					return jsonResponse({
+						id: value,
+						blockNumber: value === "new" ? 105 : 80,
+						receipt: { result: "SUCCESS" },
+					});
+				}
+				if (url.endsWith("/wallet/getblockbynum")) {
+					const request = JSON.parse(String(init?.body)) as { num: number };
+					return jsonResponse(block(request.num, `block-${request.num}`));
+				}
+				throw new Error(`Unexpected TRON request ${url}`);
+			}),
+		);
+		const transactions = await new TronAdapter({
+			apiUrl: "https://api.trongrid.io",
+			maxConcurrentRequests: 1,
+			tokens: { USDT: { contract: usdt, decimals: 6 } },
+		}).findTransactions({ address, assetCode: "USDT", sinceBlock: 100n });
+		expect(transactions).toEqual([
+			expect.objectContaining({
+				hash: "new",
+				blockNumber: 105n,
+				blockHash: "block-105",
+				confirmations: 6,
+				success: true,
+			}),
+		]);
+		expect(requested[1]).toContain(`contract_address=${usdt}`);
+		expect(
+			requested.filter((url) => url.endsWith("/wallet/gettransactioninfobyid")),
+		).toHaveLength(2);
+	});
+
 	it("redacts unexpected provider failures from health details", async () => {
 		vi.stubGlobal(
 			"fetch",
