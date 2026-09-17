@@ -43,7 +43,7 @@ export async function requestJsonRpc<T>(input: {
 	if (response.error && typeof response.error === "object") {
 		const error = response.error as Record<string, unknown>;
 		throw new JsonRpcRequestError(
-			502,
+			isRateLimitError(error) ? 429 : 502,
 			typeof error.code === "number" ? error.code : undefined,
 			"JSON-RPC provider returned an error",
 		);
@@ -55,6 +55,15 @@ export async function requestJsonRpc<T>(input: {
 			"JSON-RPC response has no result",
 		);
 	return response.result as T;
+}
+
+// Public RPCs often report throttling inside a 200 JSON-RPC error body.
+function isRateLimitError(error: Record<string, unknown>) {
+	return (
+		error.code === 429 ||
+		(typeof error.message === "string" &&
+			/rate.?limit|too many requests/i.test(error.message))
+	);
 }
 
 async function requestHttp(
@@ -93,7 +102,9 @@ async function requestHttp(
 			const error = (payload as Record<string, unknown>).error;
 			if (error && typeof error === "object" && !Array.isArray(error))
 				throw new JsonRpcRequestError(
-					response.status,
+					isRateLimitError(error as Record<string, unknown>)
+						? 429
+						: response.status,
 					typeof (error as Record<string, unknown>).code === "number"
 						? ((error as Record<string, unknown>).code as number)
 						: undefined,

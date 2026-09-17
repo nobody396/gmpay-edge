@@ -483,7 +483,9 @@ export class EvmAdapter implements PaymentAdapter<EvmConfig> {
 				if (
 					blockRange > 1 &&
 					error instanceof JsonRpcRequestError &&
-					error.rpcCode != null
+					error.rpcCode != null &&
+					// Throttling is not a range problem; splitting only multiplies calls.
+					error.status !== 429
 				) {
 					blockRange = Math.max(1, Math.floor(blockRange / 2));
 					continue;
