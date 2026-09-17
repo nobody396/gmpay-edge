@@ -62,8 +62,7 @@ describe("webhook URL validation", () => {
 			const type = new URL(url).searchParams.get("type");
 			return Response.json({
 				Status: 0,
-				Answer:
-					type === "A" ? [{ type: 1, data: "93.184.216.34" }] : [],
+				Answer: type === "A" ? [{ type: 1, data: "93.184.216.34" }] : [],
 			});
 		};
 

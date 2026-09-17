@@ -77,8 +77,8 @@ describe("checkout transaction submission", () => {
 			transactionId: "tron:checkout-transaction-1:0",
 		});
 		expect(counters).toMatchObject({
-			d1Prepare: 16,
-			d1StatementFirst: 6,
+			d1Prepare: 17,
+			d1StatementFirst: 7,
 			d1StatementAll: 4,
 			d1StatementRun: 0,
 			d1Batch: 1,

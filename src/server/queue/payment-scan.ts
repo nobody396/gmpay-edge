@@ -5,6 +5,7 @@ import {
 	resolvePaymentTransactionOrder,
 } from "#/features/payments/server/attribution";
 import { recordPaymentTransaction } from "#/features/payments/server/process";
+import { retainUnattributedPayment } from "#/features/payments/server/unattributed";
 import type { PaymentScanMessage } from "#/features/payments/types";
 import type {
 	NormalizedTransaction,
@@ -392,6 +393,7 @@ export async function processScannedTransactions(
 				!(error instanceof PaymentAttributionNotFoundError)
 			)
 				throw error;
+			await retainUnattributedPayment(env.DB, transaction, error.code);
 			skippedAmbiguous += 1;
 		}
 	}

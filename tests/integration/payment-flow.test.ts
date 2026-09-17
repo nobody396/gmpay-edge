@@ -750,6 +750,7 @@ describe("D1 payment processing flow", () => {
 			oldTransfer,
 			transaction({
 				hash: "tx-new-scan",
+				timestamp: new Date(now),
 				to: "TReusedScan11111111111111111111111",
 				confirmations: 2,
 			}),
@@ -883,11 +884,271 @@ describe("D1 payment processing flow", () => {
 			)
 			.first<{ count: number }>();
 		expect(count?.count).toBe(0);
+		expect(
+			await db
+				.prepare(
+					"SELECT amount_units FROM blockchain_transactions WHERE tx_hash='tx-attribution-ambiguous'",
+				)
+				.first(),
+		).toEqual({ amount_units: "4000000" });
 		await db
 			.prepare(
 				"DELETE FROM system_settings WHERE key = 'orders.immediate_release_mode'",
 			)
 			.run();
+	});
+	it.each([
+		159_800_000n,
+		100_000_000n,
+	])("matches an on-time non-exact payment without an expired lock poisoning attribution: %s", async (amountUnits) => {
+		const now = Date.now();
+		const suffix = amountUnits.toString();
+		const target = `TTimeWindow${suffix}`;
+		const current = `current-${suffix}`;
+		const old = `expired-${suffix}`;
+		await insertOrderWithSnapshot(db, {
+			id: old,
+			externalOrderId: old,
+			status: "expired",
+			target,
+			expiresAt: now - 3_600_000,
+			expectedAmountUnits: "17829500",
+			now: now - 5_400_000,
+		});
+		await insertOrderWithSnapshot(db, {
+			id: current,
+			externalOrderId: current,
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			expectedAmountUnits: "159290000",
+			now: now - 1000,
+		});
+		for (const [id, amount, expires, released] of [
+			[old, "17829500", now - 3_600_000, now - 3_600_000],
+			[current, "159290000", now + 900_000, null],
+		] as const) {
+			await db
+				.prepare(
+					`INSERT INTO receiving_method_locks (id, receiving_method_id, asset_id, order_id, expected_amount_units, collision_key, expires_at, reusable_at, released_at, created_at) VALUES (?, 'asset-1', 'asset-1', ?, ?, ?, ?, ?, ?, ?)`,
+				)
+				.bind(
+					id,
+					id,
+					amount,
+					id,
+					expires,
+					now + 86400000,
+					released,
+					now - 5400000,
+				)
+				.run();
+		}
+		const result = await processScannedTransactions(env, current, [
+			transaction({
+				hash: `tx-${suffix}`,
+				to: target,
+				amountUnits,
+				timestamp: new Date(now),
+				confirmations: 2,
+			}),
+		]);
+		expect(result.skippedAmbiguous).toBe(0);
+		expect(
+			await db
+				.prepare("SELECT status,received_amount_units FROM orders WHERE id=?")
+				.bind(current)
+				.first(),
+		).toEqual({
+			status: amountUnits > 159_290_000n ? "overpaid" : "partially_paid",
+			received_amount_units: suffix,
+		});
+		expect(
+			await db
+				.prepare("SELECT received_amount_units FROM orders WHERE id=?")
+				.bind(old)
+				.first(),
+		).toEqual({ received_amount_units: "0" });
+	});
+
+	it("durably retains unmatched transfers once without manufacturing an order payment", async () => {
+		const tx = transaction({
+			hash: "unmatched-transfer",
+			to: "TNoOrderTarget",
+			timestamp: new Date(),
+			confirmations: 2,
+		});
+		for (let i = 0; i < 2; i++)
+			await processScannedTransactions(env, "order-1", [tx]);
+		expect(
+			await db
+				.prepare(
+					"SELECT amount_units FROM blockchain_transactions WHERE tx_hash='unmatched-transfer'",
+				)
+				.first(),
+		).toEqual({ amount_units: "10000000" });
+		expect(
+			await db
+				.prepare(
+					"SELECT COUNT(*) count FROM audit_logs WHERE action='payment.attribution_review_required' AND json_extract(after, '$.transactionId')='tron:unmatched-transfer:0'",
+				)
+				.first(),
+		).toEqual({ count: 1 });
+		expect(
+			await db
+				.prepare(
+					"SELECT COUNT(*) count FROM order_payments WHERE transaction_id='tron:unmatched-transfer:0'",
+				)
+				.first(),
+		).toEqual({ count: 0 });
+	});
+
+	it("does not auto-settle a transfer already submitted for manual review", async () => {
+		const now = Date.now();
+		await insertOrderWithSnapshot(db, {
+			id: "review-held",
+			externalOrderId: "review-held",
+			status: "pending",
+			target: "TReviewHeld",
+			expiresAt: now + 900000,
+			now: now - 1000,
+		});
+		await db
+			.prepare(
+				`INSERT INTO payment_reviews (id,order_id,status,transaction_hash,description,evidence_key,evidence_content_type,evidence_size_bytes,evidence_sha256,created_at,updated_at) VALUES ('held-review','review-held','pending','held-transfer','review','fixture-evidence','image/png',1,'fixture',?,?)`,
+			)
+			.bind(now, now)
+			.run();
+		await processScannedTransactions(env, "review-held", [
+			transaction({
+				hash: "held-transfer",
+				to: "TReviewHeld",
+				timestamp: new Date(now),
+				confirmations: 2,
+			}),
+		]);
+		expect(
+			await db
+				.prepare(
+					"SELECT status,received_amount_units FROM orders WHERE id='review-held'",
+				)
+				.first(),
+		).toEqual({ status: "pending", received_amount_units: "0" });
+		expect(
+			await db
+				.prepare(
+					"SELECT COUNT(*) count FROM webhook_events WHERE order_id='review-held'",
+				)
+				.first(),
+		).toEqual({ count: 0 });
+		expect(
+			await db
+				.prepare("SELECT status FROM payment_reviews WHERE id='held-review'")
+				.first(),
+		).toEqual({ status: "pending" });
+	});
+	it("does not assign an exact historical transfer to an order created after it", async () => {
+		const now = Date.now();
+		await insertOrderWithSnapshot(db, {
+			id: "future-order",
+			externalOrderId: "future-order",
+			status: "pending",
+			target: "TFutureTarget",
+			expiresAt: now + 900000,
+			now,
+		});
+		const result = await processScannedTransactions(env, "future-order", [
+			transaction({
+				hash: "prior-transfer",
+				to: "TFutureTarget",
+				timestamp: new Date(now - 10000),
+				confirmations: 2,
+			}),
+		]);
+		expect(result.skippedAmbiguous).toBe(1);
+		expect(
+			await db
+				.prepare(
+					"SELECT received_amount_units FROM orders WHERE id='future-order'",
+				)
+				.first(),
+		).toEqual({ received_amount_units: "0" });
+	});
+
+	it("keeps an expired reviewed order on hold even when the late-payment policy accepts", async () => {
+		await db
+			.prepare("UPDATE orders SET status='expired' WHERE id='review-held'")
+			.run();
+		await db
+			.prepare(
+				"INSERT OR REPLACE INTO system_settings (key,value,is_secret,created_at,updated_at) VALUES ('payments.late_payment_policy','\"accept\"',0,0,0)",
+			)
+			.run();
+		try {
+			await processScannedTransactions(env, "review-held", [
+				transaction({
+					hash: "held-transfer",
+					to: "TReviewHeld",
+					timestamp: new Date(),
+					confirmations: 2,
+				}),
+			]);
+			expect(
+				await db
+					.prepare(
+						"SELECT status,received_amount_units FROM orders WHERE id='review-held'",
+					)
+					.first(),
+			).toEqual({ status: "expired", received_amount_units: "0" });
+		} finally {
+			await db
+				.prepare(
+					"DELETE FROM system_settings WHERE key='payments.late_payment_policy'",
+				)
+				.run();
+		}
+	});
+	it("accepts same-second block timestamps without matching a genuinely future checkout", async () => {
+		const now = Date.now();
+		await insertOrderWithSnapshot(db, {
+			id: "same-second",
+			externalOrderId: "same-second",
+			status: "pending",
+			target: "TSameSecond",
+			expiresAt: now + 900000,
+			now,
+		});
+		const result = await processScannedTransactions(env, "same-second", [
+			transaction({
+				hash: "same-second-transfer",
+				to: "TSameSecond",
+				timestamp: new Date(Math.floor(now / 1000) * 1000),
+				confirmations: 2,
+			}),
+		]);
+		expect(result.skippedAmbiguous).toBe(0);
+	});
+
+	it("fails closed when unresolved evidence cannot be persisted", async () => {
+		const unavailable = new Proxy(db, {
+			get(target, property, receiver) {
+				if (property === "batch")
+					return async () => {
+						throw new Error("evidence write unavailable");
+					};
+				const value = Reflect.get(target, property, receiver);
+				return typeof value === "function" ? value.bind(target) : value;
+			},
+		});
+		await expect(
+			processScannedTransactions({ ...env, DB: unavailable }, "order-1", [
+				transaction({
+					hash: "write-failure-transfer",
+					to: "TNoCandidate",
+					timestamp: new Date(),
+				}),
+			]),
+		).rejects.toThrow("evidence write unavailable");
 	});
 });
 
