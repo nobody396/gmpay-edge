@@ -129,3 +129,66 @@ describe("request authority policy", () => {
 		error.mockRestore();
 	});
 });
+
+describe("exact source IP containment", () => {
+	it.each([
+		"pay.example",
+		"gmpay-edge.example.workers.dev",
+	])("blocks source on %s without trusting spoofable forwarding headers", async (host) => {
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+		const db = database({ "security.blocked_ips": ["69.33.182.248"] });
+		const blocked = await validateRequestAuthority(
+			new Request(`https://${host}/api/auth/sign-in/email?secret=hidden`, {
+				headers: {
+					"cf-connecting-ip": "69.33.182.248",
+					"x-forwarded-for": "1.1.1.1",
+					"cf-ray": "test-ray",
+				},
+			}),
+			db,
+			"cloudflare",
+		);
+		expect(blocked?.status).toBe(403);
+		expect(warning.mock.calls.flat().join(" ")).not.toContain("hidden");
+		warning.mockRestore();
+		await expect(
+			validateRequestAuthority(
+				new Request(`https://${host}/api/providers/okpay/notify`, {
+					method: "POST",
+					headers: {
+						"cf-connecting-ip": "1.1.1.1",
+						"x-forwarded-for": "69.33.182.248",
+					},
+				}),
+				db,
+				"cloudflare",
+			),
+		).resolves.toBeNull();
+	});
+	it("does not trust a raw client header on Bun", async () => {
+		await expect(
+			validateRequestAuthority(
+				new Request("https://pay.example/", {
+					headers: { "cf-connecting-ip": "69.33.182.248" },
+				}),
+				database({ "security.blocked_ips": ["69.33.182.248"] }),
+				"bun",
+			),
+		).resolves.toBeNull();
+	});
+	it("fails closed on invalid list and does not add a second settings read", async () => {
+		const error = vi.spyOn(console, "error").mockImplementation(() => {});
+		const db = database({ "security.blocked_ips": ["0.0.0.0/0"] });
+		expect(
+			(
+				await validateRequestAuthority(
+					new Request("https://pay.example/"),
+					db,
+					"cloudflare",
+				)
+			)?.status,
+		).toBe(503);
+		expect(db.prepare).toHaveBeenCalledTimes(1);
+		error.mockRestore();
+	});
+});

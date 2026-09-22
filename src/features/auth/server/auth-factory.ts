@@ -4,7 +4,9 @@ import { createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { twoFactor } from "better-auth/plugins";
 import { tanstackStartCookies } from "better-auth/tanstack-start";
 import * as schema from "#/db/schema";
+import { sha256Hex } from "#/lib/crypto";
 import type { AppDb } from "#/server/db.server";
+import { claimFixedWindowRateLimit } from "#/server/rate-limit";
 import type { RuntimeMailSender } from "#/server/runtime/types";
 import { schedulePasswordResetEmail } from "./password-reset-email";
 
@@ -92,14 +94,59 @@ export function createAuth(db: AppDb, env: AuthEnv) {
 			},
 		},
 		hooks: {
+			before: createAuthMiddleware(async (ctx) => {
+				// HTTP mutations share atomic counters across Worker isolates. Internal
+				// server calls and session reads do not consume an IP authentication bucket.
+				if (ctx.request?.method !== "POST") return;
+				const limit =
+					ctx.path === "/request-password-reset"
+						? 3
+						: ctx.path === "/sign-in/email" ||
+								ctx.path === "/reset-password" ||
+								ctx.path.startsWith("/two-factor/")
+							? 5
+							: 20;
+				const bucketKey = await sha256Hex(
+					`auth:${ctx.path}\0${ctx.headers?.get("cf-connecting-ip") ?? "unknown"}`,
+				);
+				const result = await claimFixedWindowRateLimit(db.$client, {
+					bucketKey,
+					limit,
+					windowMs: 60_000,
+				});
+				if (result.allowed && result.count === limit) {
+					await db.$client
+						.prepare(
+							`INSERT INTO audit_logs (id, action, target_type, request_id, ip_address, after, created_at)
+						 VALUES (?, 'auth.rate_limit_reached', 'auth', ?, ?, ?, ?)`,
+						)
+						.bind(
+							crypto.randomUUID(),
+							ctx.headers?.get("x-request-id") ?? null,
+							ctx.headers?.get("cf-connecting-ip") ?? null,
+							JSON.stringify({ path: ctx.path }),
+							Date.now(),
+						)
+						.run();
+				}
+				if (!result.allowed)
+					throw APIError.from("TOO_MANY_REQUESTS", {
+						message: "Too many requests. Please try again later.",
+						code: "AUTH_RATE_LIMITED",
+					});
+			}),
 			after: createAuthMiddleware(async (ctx) => {
-				const action = securityAuditAction(ctx.path);
-				if (!action) return;
-				if (ctx.context.returned instanceof APIError) return;
-				const userId =
-					securityAuditUserId(ctx.context) ??
-					(await getSessionFromCtx(ctx).catch(() => null))?.user.id;
-				if (!userId) return;
+				const failed = ctx.context.returned instanceof APIError;
+				const failedSignIn = failed && ctx.path === "/sign-in/email";
+				const action = failedSignIn
+					? "auth.sign_in_failed"
+					: securityAuditAction(ctx.path);
+				if (!action || (failed && !failedSignIn)) return;
+				const userId = failedSignIn
+					? null
+					: (securityAuditUserId(ctx.context) ??
+						(await getSessionFromCtx(ctx).catch(() => null))?.user.id);
+				if (!userId && !failedSignIn) return;
 				const after =
 					ctx.path === "/change-password"
 						? {
@@ -117,9 +164,9 @@ export function createAuth(db: AppDb, env: AuthEnv) {
 					)
 					.bind(
 						crypto.randomUUID(),
-						userId,
+						userId ?? null,
 						action,
-						userId,
+						userId ?? null,
 						ctx.headers?.get("x-request-id") ?? null,
 						ctx.headers?.get("cf-connecting-ip") ?? null,
 						after ? JSON.stringify(after) : null,

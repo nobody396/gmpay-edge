@@ -6,6 +6,7 @@ const requestSettingsKeys = [
 	"runtime.api_key_pepper",
 	"runtime.integration_config_secret",
 	"security.allowed_hosts",
+	"security.blocked_ips",
 ] as const;
 
 type RequestSettings = ReadonlyMap<string, string>;

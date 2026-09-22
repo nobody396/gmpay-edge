@@ -352,7 +352,7 @@ describe("server entry authorization coverage", () => {
 		const entry = read("src/server-entry.ts");
 		expect(entry.indexOf("handleLivenessRequest(request)")).toBeGreaterThan(-1);
 		expect(entry.indexOf("handleLivenessRequest(request)")).toBeLessThan(
-			entry.indexOf("validateRequestAuthority(request, env.DB)"),
+			entry.indexOf("validateRequestAuthority(request, env.DB, env.runtime)"),
 		);
 		expect(entry).toContain("applySecurityHeaders(");
 	});

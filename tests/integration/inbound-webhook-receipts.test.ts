@@ -1,5 +1,5 @@
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { loadInboundWebhookReceipt } from "#/features/webhooks/server/inbound-admin";
 import {
 	inboundWebhookCatalogEndpoints,
@@ -34,11 +34,16 @@ describe("inbound webhook receipts", () => {
 	});
 
 	it("records metadata for every attempt and preserves the external request ID", async () => {
+		const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
 		const request = new Request(
 			"https://edge.example/api/providers/okpay/notify?secret=not-stored",
 			{
 				method: "POST",
-				headers: { "x-request-id": "request-a" },
+				headers: {
+					"x-request-id": "request-a",
+					"cf-connecting-ip": "192.0.2.1",
+					"cf-ray": "test-ray",
+				},
 			},
 		);
 		await recordInboundWebhookReceipt(db, {
@@ -56,6 +61,18 @@ describe("inbound webhook receipts", () => {
 			responseStatus: 401,
 			signatureStatus: "invalid",
 		});
+		expect(warning).toHaveBeenCalledTimes(2);
+		expect(JSON.parse(String(warning.mock.calls[0]?.[0]))).toMatchObject({
+			event: "webhook.rejected",
+			ip: "192.0.2.1",
+			requestId: "test-ray",
+			path: "/api/providers/okpay/notify",
+			status: 401,
+		});
+		expect(warning.mock.calls.flat().join(" ")).not.toMatch(
+			/not-stored|signature|request-a/,
+		);
+		warning.mockRestore();
 		const rows = await db
 			.prepare(
 				`SELECT id, request_id, external_request_id, request_path, signature_status, processing_status,
