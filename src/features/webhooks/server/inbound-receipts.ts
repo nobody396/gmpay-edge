@@ -57,6 +57,18 @@ export async function recordInboundWebhookReceipt(
 			: input.responseStatus >= 400
 				? "rejected"
 				: "succeeded";
+	if (input.responseStatus >= 400) {
+		console.warn(
+			JSON.stringify({
+				event: "webhook.rejected",
+				ip: input.request.headers.get("cf-connecting-ip"),
+				requestId: input.request.headers.get("cf-ray"),
+				path: endpoint.path,
+				status: input.responseStatus,
+				timestamp: now,
+			}),
+		);
+	}
 	await db
 		.prepare(
 			`INSERT INTO inbound_webhook_receipts

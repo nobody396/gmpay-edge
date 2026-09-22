@@ -102,6 +102,57 @@ describe("Better Auth account security flow", () => {
 		expect((await attempt("198.51.100.10")).status).not.toBe(429);
 	});
 
+	it("shares atomic sign-in limits across independent auth instances", async () => {
+		const attempt = (ipAddress: string) => {
+			const instance = createAuth(drizzle(database, { schema }), {
+				BETTER_AUTH_SECRET: runtime.betterAuthSecret,
+				BETTER_AUTH_URL: runtime.betterAuthUrl,
+			});
+			// Disable the process-global memory limiter to emulate separate isolates.
+			Object.assign(instance.options.rateLimit, { enabled: false });
+			return instance.handler(
+				new Request(`${runtime.betterAuthUrl}/api/auth/sign-in/email`, {
+					method: "POST",
+					headers: {
+						"cf-connecting-ip": ipAddress,
+						"content-type": "application/json",
+						origin: runtime.betterAuthUrl,
+					},
+					body: JSON.stringify({ email, password: "incorrect-password" }),
+				}),
+			);
+		};
+		const responses = await Promise.all(
+			Array.from({ length: 8 }, () => attempt("192.0.2.77")),
+		);
+		expect(
+			responses.filter((response) => response.status === 429),
+		).toHaveLength(3);
+		expect(
+			responses.filter((response) => response.status === 401),
+		).toHaveLength(5);
+		expect((await attempt("192.0.2.78")).status).toBe(401);
+		const audit = await database
+			.prepare(
+				"SELECT action, actor_user_id, after FROM audit_logs WHERE ip_address = ?",
+			)
+			.bind("192.0.2.77")
+			.all<{
+				action: string;
+				actor_user_id: string | null;
+				after: string | null;
+			}>();
+		expect(
+			audit.results.filter((row) => row.action === "auth.sign_in_failed"),
+		).toHaveLength(5);
+		expect(
+			audit.results.filter((row) => row.action === "auth.rate_limit_reached"),
+		).toHaveLength(1);
+		expect(audit.results.every((row) => row.actor_user_id === null)).toBe(true);
+		expect(JSON.stringify(audit.results)).not.toContain(email);
+		expect(JSON.stringify(audit.results)).not.toContain("incorrect-password");
+	});
+
 	it("enables, verifies, challenges and disables TOTP with a backup code", async () => {
 		const signedIn = await auth.api.signInEmail({
 			body: { email, password },

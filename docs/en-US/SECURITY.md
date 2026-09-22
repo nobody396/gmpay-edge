@@ -46,3 +46,11 @@ rejected and do not create a user or credential account.
 - Administrative order cancellation is recoverably idempotent across its state and notification boundary. It commits the guarded state transition, receiving-target release, and attributed audit record in one D1 batch; a failed optimistic update writes none of them. Retrying an already-cancelled order idempotently persists any missing Webhook event without creating a second transition or audit entry.
 - Binance and OKX public exchange-rate polling requires no private credential. A stale observation is never used for a new order.
 - No private key or mnemonic is required by any receiving method or the simulator. Live provider credentials must never enter source control.
+
+## Shared authentication limits and source containment
+
+Authentication POST requests use atomic D1 fixed-window counters shared across Worker instances: 5/minute for sign-in, password reset and second-factor routes; 3/minute for password-reset requests; 20/minute for other routes. Failed sign-ins and one threshold event per source/route/window are audited without submitted credentials.
+
+Operators may set `security.blocked_ips` in `system_settings` to a JSON array of at most 100 exact IPv4 addresses. Missing means no application-level blocks; malformed configuration fails closed. This policy trusts `CF-Connecting-IP` only in the Cloudflare runtime and covers both custom domains and workers.dev. It is not a Bun proxy-trust configuration or a CIDR firewall. The binding-independent liveness endpoint stays available.
+
+Blocked-source and rejected-callback runtime logs contain only source IP, Ray ID, route, status and time, never query strings or payloads. Historical callback receipts do not contain source IP; retain Cloudflare logs for attribution. TOTP must be enrolled by the administrator before enforcing it.

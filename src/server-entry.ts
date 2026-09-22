@@ -26,7 +26,7 @@ export async function handleAppRequest(request: Request, env: RuntimeEnv) {
 			]),
 		);
 	const authorityStartedAt = performance.now();
-	const rejected = await validateRequestAuthority(request, env.DB);
+	const rejected = await validateRequestAuthority(request, env.DB, env.runtime);
 	const authorityDurationMs = performance.now() - authorityStartedAt;
 	if (rejected)
 		return applySecurityHeaders(

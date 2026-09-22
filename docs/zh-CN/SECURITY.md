@@ -50,3 +50,11 @@
 ## Worker 响应
 
 HTTPS 响应启用 HSTS、禁止 Frame、MIME Sniffing 防护、严格 Referrer Policy、受限 Permissions Policy 与同源资源策略。生产环境还必须配置正确的 Allowed Hosts、Origin/CSRF 校验和登录/API 限流。
+
+## 共享认证限流与来源封禁
+
+认证 POST 使用跨 Worker 实例共享的 D1 原子固定窗口计数：登录、重置密码及第二因素接口每分钟 5 次，申请密码重置每分钟 3 次，其他接口每分钟 20 次。记录失败登录，以及每个来源/接口/窗口一次阈值事件，不记录提交的凭据。
+
+运维可将 `system_settings` 的 `security.blocked_ips` 设置为最多 100 个精确 IPv4 地址的 JSON 数组。缺省表示不增加应用层封禁，格式损坏则拒绝请求。仅 Cloudflare 运行时信任 `CF-Connecting-IP`，同时覆盖自定义域名与 workers.dev；这不是 Bun 代理信任配置，也不支持网段封禁。无绑定依赖的存活检查保持可用。
+
+封禁来源和拒绝回调的运行日志仅记录来源 IP、Ray ID、路由、状态与时间，不记录查询参数或请求体。历史回调记录没有来源 IP，应保留 Cloudflare 日志用于归因。管理员应本人绑定 TOTP，再考虑强制启用。
