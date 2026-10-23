@@ -9,6 +9,7 @@ import {
 	vi,
 } from "vitest";
 import {
+	applyFiatRateAdjustment,
 	fetchCryptoRateQuotes,
 	fetchExchangeRateQuote,
 	fetchFiatRates,
@@ -397,6 +398,7 @@ describe("exchange-rate refresh", () => {
 			null,
 			now,
 		);
+		await applyFiatRateAdjustment(db, 125, now);
 		await refreshExchangeRates(db, request, now + 1, {
 			category: "fiat",
 			apiKey: "secret",

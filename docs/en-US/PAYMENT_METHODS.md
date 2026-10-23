@@ -156,7 +156,8 @@ observations.
 Each rate page has its own sync settings. Crypto settings select Binance or OKX
 and an automatic interval. Fiat settings select a provider (currently
 `exchangerate.host`), its API Key, an automatic interval, and an adjustment in
-basis points. Each category has an independent automatic-sync switch. The
+basis points. Without an exchangerate.host API Key, fiat synchronization uses
+the keyless Frankfurter API and records `frankfurter` as the row source. Each category has an independent automatic-sync switch. The
 one-minute Cron skips disabled categories and otherwise executes only when the
 saved interval is due. **Run now** first saves the current settings and then
 bypasses both the automatic-sync switch and due-time check.
@@ -166,8 +167,10 @@ zero quote. Before the first successful observation, `raw_rate` and `rate` are
 null, the admin lists render `—`, and order quoting ignores the row.
 
 Every synchronized row stores both `raw_rate` from the provider and final
-`rate`. Synchronization applies the configured basis-point adjustment with exact
-decimal arithmetic before writing the final value. Both lists display “Original
+`rate`. Synchronization applies the basis-point adjustment with exact decimal
+arithmetic before writing the final value. A fiat pair that already exists keeps
+its stored adjustment; new pairs use the configured adjustment, and saving a
+changed fiat adjustment re-applies it to every stored fiat pair. Both lists display “Original
 rate” and “Rate”, without source or basis-point columns. Manually editing either
 category changes only the final `rate`; it preserves the last provider raw value,
 source, and observation time. The next successful synchronization updates both
@@ -353,8 +356,9 @@ malformed provider response never overwrites its previous observation. Fiat
 sync normalizes the provider's USD quote table and upserts valid three-letter
 currency rows while preserving both raw and adjusted values.
 
-Every refresh returns configured, updated, and failed counts. Partial failures
-write one structured audit summary containing only the source, pair, and stable
+Every refresh returns configured, updated, and failed counts. Any failure,
+including a fiat provider failure before a pair exists, writes one structured
+audit summary containing only the source, pair, and stable
 error code; provider response bodies are not persisted. Successful scheduled
 runs do not create per-minute audit noise, while administrator-triggered runs
 are always attributed to their actor, request ID, and source IP.

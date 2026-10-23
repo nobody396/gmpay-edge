@@ -5,6 +5,7 @@ const providerAdapterIds = [
 	"binance",
 	"evm",
 	"exchangerate_host",
+	"frankfurter",
 	"okpay",
 	"okx",
 	"solana",

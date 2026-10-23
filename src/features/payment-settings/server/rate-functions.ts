@@ -4,6 +4,7 @@ import { paymentSettingsPermission } from "#/features/access/system-rbac";
 import { paymentSettingsError } from "#/features/payment-settings/errors";
 import { adminContext } from "#/features/payment-settings/server/admin-context";
 import {
+	applyFiatRateAdjustment,
 	loadRateSyncConfiguration,
 	loadRatesPageData,
 	refreshExchangeRates,
@@ -143,6 +144,8 @@ export const saveRateSyncSettingsFn = createServerFn({ method: "POST" })
 			context.user.id,
 			now,
 		);
+		if (data.adjustmentBps !== current.adjustmentBps)
+			await applyFiatRateAdjustment(context.db, data.adjustmentBps, now);
 		await auditRateSyncSettings(
 			context,
 			data.category,
