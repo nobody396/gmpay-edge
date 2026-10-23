@@ -41,21 +41,14 @@ const envelopeSchema = z.object({
 	data: z.array(z.unknown()).default([]),
 	meta: z.object({ fingerprint: z.string().min(1).optional() }).optional(),
 });
+// Account rows only locate candidate transactions; amounts and identity come
+// from the receipt.
 const trc20TransferSchema = z.object({
 	transaction_id: z.string(),
-	block_timestamp: z.number(),
-	// TronGrid stopped returning block_number on account TRC20 rows; it is
-	// resolved from the transaction receipt when absent.
+	// TronGrid stopped returning block_number on account TRC20 rows.
 	block_number: z.number().optional(),
-	from: z.string(),
 	to: z.string(),
-	value: z.string().regex(/^\d+$/),
-	type: z.string().optional(),
-	_unconfirmed: z.boolean().optional(),
-	token_info: z.object({
-		symbol: z.string(),
-		address: z.string().optional(),
-	}),
+	token_info: z.object({ address: z.string().optional() }),
 });
 const transactionInfoSchema = z.looseObject({
 	id: z.string().optional(),
@@ -79,10 +72,6 @@ const logSchema = z.object({
 	transactionHash: z.string(),
 	removed: z.boolean().optional(),
 });
-type ResolvedTrc20Transfer = z.infer<typeof trc20TransferSchema> & {
-	block_number: number;
-	success: boolean;
-};
 const atomicAmountSchema = z.union([
 	z.string().regex(/^\d+$/),
 	z
@@ -170,10 +159,17 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 		);
 	}
 	private async getTransactionObserved(
-		hash: string,
+		submittedHash: string,
 		lookup: TransactionLookup | undefined,
 		counters: ProviderOperationCounters,
 	): Promise<NormalizedTransaction | null> {
+		const hash = canonicalTronHash(submittedHash);
+		if (!hash) return null;
+		const wantsNative = lookup?.assetCode?.toUpperCase() === "TRX";
+		const contract = this.tokenContract(lookup?.assetCode);
+		// A token transfer is only trusted from the configured contract's receipt
+		// log; symbols and indexer event rows are free for anyone to imitate.
+		if (!wantsNative && (!contract || !lookup?.assetCode)) return null;
 		const deadlineAt = operationDeadline(this.config.timeoutMs);
 		const [info, current] = await Promise.all([
 			this.request<unknown>(
@@ -189,15 +185,9 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 		]);
 		const parsedInfo = transactionInfoSchema.parse(info);
 		if (!parsedInfo.id || parsedInfo.blockNumber == null) return null;
-		const blockHash = await this.blockHash(
-			parsedInfo.blockNumber,
-			deadlineAt,
-			counters,
-		);
-		const wantsNative = lookup?.assetCode?.toUpperCase() === "TRX";
-		if (this.logScan && !wantsNative) {
-			const contract = this.tokenContract(lookup?.assetCode);
-			if (!contract || !lookup?.assetCode) return null;
+		if (canonicalTronHash(parsedInfo.id) !== hash)
+			throw new Error("TRON API returned the wrong transaction");
+		if (!wantsNative && contract && lookup?.assetCode) {
 			const transfer = receiptTransfers(parsedInfo, contract).find(
 				(candidate) =>
 					(lookup.address == null || candidate.to === lookup.address) &&
@@ -211,66 +201,12 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 				transfer,
 				lookup.assetCode,
 				current,
-				blockHash,
+				await this.blockHash(parsedInfo.blockNumber, deadlineAt, counters),
 			);
 		}
-		const eventEnvelope = wantsNative
-			? { data: [] }
-			: envelopeSchema.parse(
-					await this.request(
-						`/v1/transactions/${encodeURIComponent(hash)}/events?event_name=Transfer&only_confirmed=false`,
-						undefined,
-						deadlineAt,
-						counters,
-					),
-				);
-		const event = eventEnvelope.data.find((candidate) =>
-			matchesTokenEvent(candidate, lookup),
-		);
-		if (event) {
-			const transfer = z
-				.object({
-					contract_address: z.string(),
-					block_timestamp: z.number(),
-					event_index: z.coerce.number().int().nonnegative().optional(),
-					result: z.object({
-						from: z.string(),
-						to: z.string(),
-						value: z.string().regex(/^\d+$/),
-					}),
-					result_type: z.record(z.string(), z.string()).optional(),
-					_unconfirmed: z.boolean().optional(),
-				})
-				.parse(event);
-			const contract = this.tokenContract(lookup?.assetCode);
-			if (contract && transfer.contract_address !== contract) return null;
-			const tokenEnvelope = envelopeSchema.parse(
-				await this.request(
-					`/v1/trc20/info?contract_list=${encodeURIComponent(transfer.contract_address)}`,
-					undefined,
-					deadlineAt,
-					counters,
-				),
-			);
-			const token = z
-				.object({ symbol: z.string() })
-				.parse(tokenEnvelope.data[0]);
-			if (
-				lookup?.assetCode &&
-				token.symbol.toUpperCase() !== lookup.assetCode.toUpperCase()
-			)
-				return null;
-			return this.normalizeTokenEvent(
-				hash,
-				parsedInfo.blockNumber,
-				transfer,
-				token.symbol,
-				current,
-				blockHash,
-			);
-		}
-		const raw = trxTransactionSchema.parse(
-			await this.request(
+		const [blockHash, rawTransaction] = await Promise.all([
+			this.blockHash(parsedInfo.blockNumber, deadlineAt, counters),
+			this.request(
 				"/wallet/gettransactionbyid",
 				{
 					method: "POST",
@@ -279,11 +215,13 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 				deadlineAt,
 				counters,
 			),
+		]);
+		return this.normalizeTrx(
+			trxTransactionSchema.parse(rawTransaction),
+			current,
+			blockHash,
+			lookup,
 		);
-		const normalized = this.normalizeTrx(raw, current, blockHash, lookup);
-		return lookup?.assetCode && lookup.assetCode.toUpperCase() !== "TRX"
-			? null
-			: normalized;
 	}
 	async findTransactions(input: {
 		address: string;
@@ -311,24 +249,9 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 	): Promise<NormalizedTransaction[]> {
 		const deadlineAt = operationDeadline(this.config.timeoutMs);
 		const current = await this.currentBlock(deadlineAt, counters);
+		const native = input.assetCode.toUpperCase() === "TRX";
 		const contract = this.tokenContract(input.assetCode);
-		if (this.logScan) {
-			if (!contract) throw new TronConfigurationError();
-			return this.findTransferLogs(
-				input,
-				contract,
-				current,
-				deadlineAt,
-				counters,
-			);
-		}
-		const path =
-			input.assetCode.toUpperCase() === "TRX"
-				? `/v1/accounts/${input.address}/transactions?only_to=true&limit=200&order_by=block_timestamp,desc`
-				: `/v1/accounts/${input.address}/transactions/trc20?only_to=true&limit=200&order_by=block_timestamp,desc${
-						contract ? `&contract_address=${encodeURIComponent(contract)}` : ""
-					}`;
-		const rows = await this.accountTransactions(path, deadlineAt, counters);
+		if (!native && !contract) throw new TronConfigurationError();
 		const blockHashes = new Map<number, Promise<string>>();
 		const blockHash = (blockNumber: number) => {
 			let pending = blockHashes.get(blockNumber);
@@ -338,58 +261,149 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 			}
 			return pending;
 		};
-		const transactions =
-			input.assetCode.toUpperCase() === "TRX"
-				? await mapConcurrently(
-						rows
-							.map((row) => trxTransactionSchema.parse(row))
-							.filter(
-								(row) =>
-									input.sinceBlock == null ||
-									BigInt(row.blockNumber) >= input.sinceBlock,
-							),
-						this.config.maxConcurrentRequests,
-						async (row) => {
-							return this.normalizeTrx(
-								row,
-								current,
-								await blockHash(row.blockNumber),
-							);
-						},
+		if (contract && !native) {
+			const hashes = this.logScan
+				? await this.findTransferLogHashes(
+						input,
+						contract,
+						current,
+						deadlineAt,
+						counters,
 					)
-				: await mapConcurrently(
-						await this.resolveTrc20Blocks(
-							rows
-								.map((row) => trc20TransferSchema.parse(row))
-								.filter(
-									(row) =>
-										row.to === input.address &&
-										row.token_info.symbol.toUpperCase() ===
-											input.assetCode.toUpperCase() &&
-										// A token only counts when it is the configured contract;
-										// symbols are free for anyone to copy.
-										(!contract || row.token_info.address === contract),
-								),
-							input.sinceBlock,
-							deadlineAt,
-							counters,
-						),
-						this.config.maxConcurrentRequests,
-						async (row) => {
-							return this.normalizeTrc20(
-								row,
-								current,
-								await blockHash(row.block_number),
-							);
-						},
+				: await this.findIndexedTransferHashes(
+						input,
+						contract,
+						deadlineAt,
+						counters,
 					);
+			return this.receiptTransactions(
+				hashes,
+				input,
+				contract,
+				current,
+				blockHash,
+				deadlineAt,
+				counters,
+			);
+		}
+		const rows = await this.accountTransactions(
+			`/v1/accounts/${input.address}/transactions?only_to=true&limit=200&order_by=block_timestamp,desc`,
+			deadlineAt,
+			counters,
+		);
+		const transactions = await mapConcurrently(
+			rows
+				.map((row) => trxTransactionSchema.parse(row))
+				.filter(
+					(row) =>
+						input.sinceBlock == null ||
+						BigInt(row.blockNumber) >= input.sinceBlock,
+				),
+			this.config.maxConcurrentRequests,
+			async (row) =>
+				this.normalizeTrx(row, current, await blockHash(row.blockNumber)),
+		);
 		return transactions.filter(
 			(transaction) =>
 				transaction.to === input.address &&
-				transaction.assetCode.toUpperCase() === input.assetCode.toUpperCase() &&
 				(input.sinceBlock == null ||
 					transaction.blockNumber >= input.sinceBlock),
 		);
+	}
+	/**
+	 * TronGrid account rows only locate candidate transactions. Rows that carry a
+	 * block below the scan cursor are skipped before any receipt lookup.
+	 */
+	private async findIndexedTransferHashes(
+		input: { address: string; sinceBlock?: bigint },
+		contract: string,
+		deadlineAt: number,
+		counters: ProviderOperationCounters,
+	) {
+		const rows = await this.accountTransactions(
+			`/v1/accounts/${input.address}/transactions/trc20?only_to=true&limit=200&order_by=block_timestamp,desc&contract_address=${encodeURIComponent(contract)}`,
+			deadlineAt,
+			counters,
+		);
+		const hashes = new Set<string>();
+		for (const row of rows.map((value) => trc20TransferSchema.parse(value))) {
+			const hash = canonicalTronHash(row.transaction_id);
+			if (
+				!hash ||
+				row.to !== input.address ||
+				(row.token_info.address != null && row.token_info.address !== contract)
+			)
+				continue;
+			if (
+				input.sinceBlock != null &&
+				row.block_number != null &&
+				BigInt(row.block_number) < input.sinceBlock
+			)
+				continue;
+			hashes.add(hash);
+		}
+		return [...hashes];
+	}
+	/**
+	 * Both scan transports and submitted hashes derive a transfer's identity from
+	 * the same receipt: its event index is the log position inside the transaction.
+	 * Hashes arrive newest first, so lookup stops after the batch that reaches
+	 * below the scan cursor instead of reading the whole address history.
+	 */
+	private async receiptTransactions(
+		hashes: readonly string[],
+		input: { address: string; assetCode: string; sinceBlock?: bigint },
+		contract: string,
+		current: { number: number },
+		blockHash: (blockNumber: number) => Promise<string>,
+		deadlineAt: number,
+		counters: ProviderOperationCounters,
+	): Promise<NormalizedTransaction[]> {
+		const transactions: NormalizedTransaction[] = [];
+		const size = this.config.maxConcurrentRequests;
+		for (let index = 0; index < hashes.length; index += size) {
+			const batch = await Promise.all(
+				hashes.slice(index, index + size).map(async (hash) => {
+					const info = transactionInfoSchema.parse(
+						await this.request(
+							"/wallet/gettransactioninfobyid",
+							{ method: "POST", body: JSON.stringify({ value: hash }) },
+							deadlineAt,
+							counters,
+						),
+					);
+					const blockNumber = info.blockNumber;
+					// Not yet in a block: the next scan picks it up.
+					if (blockNumber == null) return null;
+					if (canonicalTronHash(info.id ?? "") !== hash)
+						throw new Error("TRON API returned the wrong transaction");
+					if (
+						input.sinceBlock != null &&
+						BigInt(blockNumber) < input.sinceBlock
+					)
+						return "below_cursor" as const;
+					const transfers = receiptTransfers(info, contract).filter(
+						(transfer) => transfer.to === input.address,
+					);
+					if (!transfers.length) return null;
+					const resolvedHash = await blockHash(blockNumber);
+					return transfers.map((transfer) =>
+						this.normalizeReceiptTransfer(
+							hash,
+							info,
+							transfer,
+							input.assetCode,
+							current,
+							resolvedHash,
+						),
+					);
+				}),
+			);
+			for (const result of batch)
+				if (Array.isArray(result)) transactions.push(...result);
+			if (batch.includes("below_cursor")) break;
+		}
+		return transactions;
 	}
 	// A node `/jsonrpc` endpoint needs no TronGrid key: transfers come from
 	// eth_getLogs and receipts from the node HTTP API next to it.
@@ -399,13 +413,13 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 	private get nodeUrl() {
 		return this.config.apiUrl.replace(/\/$/, "").replace(/\/jsonrpc$/, "");
 	}
-	private async findTransferLogs(
-		input: { address: string; assetCode: string; sinceBlock?: bigint },
+	private async findTransferLogHashes(
+		input: { address: string; sinceBlock?: bigint },
 		contract: string,
 		current: { number: number },
 		deadlineAt: number,
 		counters: ProviderOperationCounters,
-	): Promise<NormalizedTransaction[]> {
+	): Promise<string[]> {
 		const latest = current.number;
 		if (input.sinceBlock != null && input.sinceBlock > BigInt(latest))
 			return [];
@@ -448,50 +462,14 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 			}
 			for (const row of z.array(logSchema).parse(raw)) {
 				if (row.removed) continue;
-				hashes.add(row.transactionHash.replace(/^0x/i, "").toLowerCase());
+				const hash = canonicalTronHash(row.transactionHash);
+				if (hash) hashes.add(hash);
 			}
 			if (hashes.size > this.config.maxScanTransactions)
 				throw new Error("TRON scan exceeded the configured row limit");
 			rangeStart = rangeEnd + 1;
 		}
-		const blockHashes = new Map<number, Promise<string>>();
-		const perTransaction = await mapConcurrently(
-			[...hashes],
-			this.config.maxConcurrentRequests,
-			async (hash) => {
-				const info = transactionInfoSchema.parse(
-					await this.request(
-						"/wallet/gettransactioninfobyid",
-						{ method: "POST", body: JSON.stringify({ value: hash }) },
-						deadlineAt,
-						counters,
-					),
-				);
-				const blockNumber = info.blockNumber;
-				if (blockNumber == null) return [];
-				const transfers = receiptTransfers(info, contract).filter(
-					(transfer) => transfer.to === input.address,
-				);
-				if (!transfers.length) return [];
-				let blockHash = blockHashes.get(blockNumber);
-				if (!blockHash) {
-					blockHash = this.blockHash(blockNumber, deadlineAt, counters);
-					blockHashes.set(blockNumber, blockHash);
-				}
-				const resolvedHash = await blockHash;
-				return transfers.map((transfer) =>
-					this.normalizeReceiptTransfer(
-						hash,
-						info,
-						transfer,
-						input.assetCode,
-						current,
-						resolvedHash,
-					),
-				);
-			},
-		);
-		return perTransaction.flat();
+		return [...hashes];
 	}
 	private normalizeReceiptTransfer(
 		hash: string,
@@ -549,55 +527,6 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 			([code]) => code.toUpperCase() === upper,
 		);
 		return entry?.[1].contract;
-	}
-	// Rows arrive newest first, so resolution stops at the first batch that
-	// reaches below the scan cursor instead of looking up the whole history.
-	private async resolveTrc20Blocks(
-		rows: z.infer<typeof trc20TransferSchema>[],
-		sinceBlock: bigint | undefined,
-		deadlineAt: number,
-		counters: ProviderOperationCounters,
-	): Promise<ResolvedTrc20Transfer[]> {
-		const resolved: ResolvedTrc20Transfer[] = [];
-		const size = this.config.maxConcurrentRequests;
-		for (let index = 0; index < rows.length; index += size) {
-			const batch = await Promise.all(
-				rows.slice(index, index + size).map(async (row) => {
-					if (row.block_number != null)
-						return { ...row, block_number: row.block_number, success: true };
-					const info = transactionInfoSchema.parse(
-						await this.request(
-							"/wallet/gettransactioninfobyid",
-							{
-								method: "POST",
-								body: JSON.stringify({ value: row.transaction_id }),
-							},
-							deadlineAt,
-							counters,
-						),
-					);
-					// Not yet in a block: the next scan picks it up.
-					if (info.blockNumber == null) return null;
-					return {
-						...row,
-						block_number: info.blockNumber,
-						success:
-							info.receipt?.result == null || info.receipt.result === "SUCCESS",
-					};
-				}),
-			);
-			let reachedCursor = false;
-			for (const row of batch) {
-				if (!row) continue;
-				if (sinceBlock != null && BigInt(row.block_number) < sinceBlock) {
-					reachedCursor = true;
-					continue;
-				}
-				resolved.push(row);
-			}
-			if (reachedCursor) break;
-		}
-		return resolved;
 	}
 	private async accountTransactions(
 		path: string,
@@ -754,29 +683,6 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 		if (!response.ok) throw new TronHttpError(response.status);
 		return (await response.json()) as T;
 	}
-	private normalizeTrc20(
-		row: ResolvedTrc20Transfer,
-		current: { number: number },
-		blockHash: string,
-	): NormalizedTransaction {
-		return {
-			network: "tron",
-			hash: row.transaction_id,
-			eventIndex: 0,
-			from: row.from,
-			to: row.to,
-			assetCode: row.token_info.symbol.toUpperCase(),
-			amountUnits: BigInt(row.value),
-			blockNumber: BigInt(row.block_number),
-			blockHash,
-			confirmations: row._unconfirmed
-				? 0
-				: confirmations(current.number, row.block_number),
-			timestamp: new Date(row.block_timestamp),
-			success: row.success,
-			canonical: true,
-		};
-	}
 	private normalizeTrx(
 		row: z.infer<typeof trxTransactionSchema>,
 		current: { number: number },
@@ -793,7 +699,7 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 		if (!transfer) throw new Error("Unsupported TRON transaction contract");
 		return {
 			network: "tron",
-			hash: row.txID,
+			hash: row.txID.toLowerCase(),
 			eventIndex: 0,
 			from: tronHexToBase58(transfer.parameter.value.owner_address),
 			to: tronHexToBase58(transfer.parameter.value.to_address),
@@ -804,38 +710,6 @@ export class TronAdapter implements PaymentAdapter<TronConfig> {
 			confirmations: confirmations(current.number, row.blockNumber),
 			timestamp: new Date(row.block_timestamp),
 			success: row.ret.every((result) => result.contractRet === "SUCCESS"),
-			canonical: true,
-		};
-	}
-	private normalizeTokenEvent(
-		hash: string,
-		blockNumber: number,
-		event: {
-			contract_address: string;
-			block_timestamp: number;
-			event_index?: number | undefined;
-			result: { from: string; to: string; value: string };
-			_unconfirmed?: boolean | undefined;
-		},
-		symbol: string,
-		current: { number: number },
-		blockHash: string,
-	): NormalizedTransaction {
-		return {
-			network: "tron",
-			hash,
-			eventIndex: Number(event.event_index ?? 0),
-			from: normalizeTronEventAddress(event.result.from),
-			to: normalizeTronEventAddress(event.result.to),
-			assetCode: symbol.toUpperCase(),
-			amountUnits: BigInt(event.result.value),
-			blockNumber: BigInt(blockNumber),
-			blockHash,
-			confirmations: event._unconfirmed
-				? 0
-				: confirmations(current.number, blockNumber),
-			timestamp: new Date(event.block_timestamp),
-			success: true,
 			canonical: true,
 		};
 	}
@@ -891,7 +765,10 @@ function receiptTransfers(
 			value.replace(/^0x/i, "").toLowerCase(),
 		);
 		if (
-			log.address?.replace(/^(0x|41)/i, "").toLowerCase() !== contractHex ||
+			log.address
+				?.replace(/^0x/i, "")
+				.replace(/^41(?=[0-9a-f]{40}$)/i, "")
+				.toLowerCase() !== contractHex ||
 			topic !== transferTopic ||
 			!from ||
 			!to ||
@@ -912,28 +789,13 @@ class TronHttpError extends Error {
 		super(`TRON API returned HTTP ${status}`);
 	}
 }
+/** TRON transaction IDs are 32-byte hex; providers and payers vary case and `0x`. */
+function canonicalTronHash(value: string) {
+	const hash = value.trim().replace(/^0x/i, "").toLowerCase();
+	return /^[0-9a-f]{64}$/.test(hash) ? hash : null;
+}
 function confirmations(current: number, block: number) {
 	return Math.max(0, current - block + 1);
-}
-function matchesTokenEvent(candidate: unknown, lookup?: TransactionLookup) {
-	if (!lookup?.address && lookup?.eventIndex == null) return true;
-	const parsed = z
-		.object({
-			event_index: z.coerce.number().int().nonnegative().optional(),
-			result: z.object({ to: z.string() }),
-		})
-		.safeParse(candidate);
-	if (!parsed.success) return false;
-	try {
-		return (
-			(lookup.address == null ||
-				normalizeTronEventAddress(parsed.data.result.to) === lookup.address) &&
-			(lookup.eventIndex == null ||
-				(parsed.data.event_index ?? 0) === lookup.eventIndex)
-		);
-	} catch {
-		return false;
-	}
 }
 function tronHexToBase58(value: string) {
 	const bytes = Uint8Array.from(

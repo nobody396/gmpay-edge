@@ -1,0 +1,1 @@
+CREATE INDEX `blockchain_transactions_hash_nocase_idx` ON `blockchain_transactions` (`network`,LOWER("tx_hash"));

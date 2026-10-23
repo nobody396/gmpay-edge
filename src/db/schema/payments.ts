@@ -488,6 +488,10 @@ export const blockchainTransactions = sqliteTable(
 			table.txHash,
 			table.eventIndex,
 		),
+		index("blockchain_transactions_hash_nocase_idx").on(
+			table.network,
+			sql`LOWER(${table.txHash})`,
+		),
 	],
 );
 

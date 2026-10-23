@@ -1,6 +1,10 @@
 import type { OrderStatus } from "#/features/orders/schema";
 import { assertTransition } from "#/features/orders/state-machine";
-import { paymentTargetAddressMatches } from "#/features/payments/server/attribution";
+import {
+	findSameTransferAttribution,
+	paymentTargetAddressMatches,
+	transactionHashKey,
+} from "#/features/payments/server/attribution";
 import {
 	displayOrderAmounts,
 	type StoredOrderAmounts,
@@ -78,6 +82,15 @@ export async function recordPaymentTransaction(
 			422,
 			"Transaction does not match the payment target",
 		);
+	}
+	const sameTransfer = await findSameTransferAttribution(env.DB, transaction);
+	if (sameTransfer) {
+		if (
+			sameTransfer.order_id !== orderId ||
+			sameTransfer.amount_units !== transaction.amountUnits.toString()
+		)
+			throw new PaymentAttributionConflictError();
+		return { duplicate: true, status: order.status };
 	}
 	if (order.status === "expired" || order.status === "cancelled") {
 		const policy = (await loadOperationalSettings(env.DB)).latePaymentPolicy;
@@ -266,8 +279,18 @@ export async function recordPaymentTransaction(
 					now,
 					existingPayment.id,
 				)
-			: env.DB.prepare(
-					"INSERT OR IGNORE INTO order_payments (id, order_id, transaction_id, amount_units, confirmations, status, detected_at, confirmed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			: // Re-checks the same-transfer guard inside the batch so a concurrent
+				// attribution under another identity rolls this whole write back.
+				env.DB.prepare(
+					`INSERT OR IGNORE INTO order_payments (id, order_id, transaction_id, amount_units, confirmations, status, detected_at, confirmed_at, created_at, updated_at)
+					 SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+					 WHERE NOT EXISTS (
+					  SELECT 1 FROM blockchain_transactions bt INDEXED BY blockchain_transactions_hash_nocase_idx
+					  JOIN order_payments op
+					  ON op.transaction_id = bt.network || ':' || bt.tx_hash || ':' || bt.event_index
+					  WHERE bt.network = ? AND LOWER(bt.tx_hash) IN (?, ?)
+					  AND LOWER(bt.to_address) = LOWER(?) AND op.transaction_id <> ?
+					 )`,
 				).bind(
 					paymentRowId,
 					orderId,
@@ -279,6 +302,11 @@ export async function recordPaymentTransaction(
 					paymentStatus === "confirmed" ? now : null,
 					now,
 					now,
+					transaction.network,
+					transactionHashKey(transaction.hash),
+					`0x${transactionHashKey(transaction.hash)}`,
+					transaction.to,
+					transactionId,
 				),
 		env.DB.prepare(
 			`UPDATE orders SET status = ?, received_amount_units = ?,
@@ -354,7 +382,11 @@ export async function recordPaymentTransaction(
 				order_status: OrderStatus;
 			}>();
 		if (attributed?.order_id !== orderId) {
-			if (attributed) throw new PaymentAttributionConflictError();
+			if (
+				attributed ||
+				(await findSameTransferAttribution(env.DB, transaction))
+			)
+				throw new PaymentAttributionConflictError();
 			throw error;
 		}
 		if (

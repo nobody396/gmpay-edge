@@ -89,13 +89,13 @@ describe("OKPay notification flow", () => {
 			attempt: 1,
 		});
 		expect(firstCounters).toEqual({
-			d1Prepare: 15,
+			d1Prepare: 16,
 			d1Batch: 1,
 			d1Exec: 0,
-			d1StatementBind: 13,
+			d1StatementBind: 14,
 			d1StatementRun: 1,
 			d1StatementFirst: 4,
-			d1StatementAll: 3,
+			d1StatementAll: 4,
 			d1StatementRaw: 0,
 			kvGet: 0,
 			kvPut: 0,
@@ -104,13 +104,13 @@ describe("OKPay notification flow", () => {
 			r2Get: 0,
 		});
 		expect(repeatedCounters).toEqual({
-			d1Prepare: 5,
+			d1Prepare: 6,
 			d1Batch: 0,
 			d1Exec: 0,
-			d1StatementBind: 5,
+			d1StatementBind: 6,
 			d1StatementRun: 1,
 			d1StatementFirst: 3,
-			d1StatementAll: 1,
+			d1StatementAll: 2,
 			d1StatementRaw: 0,
 			kvGet: 0,
 			kvPut: 0,

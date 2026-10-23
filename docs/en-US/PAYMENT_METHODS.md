@@ -51,7 +51,7 @@ The default hard request-count bounds per adapter operation are:
 
 | Adapter | Default maximum physical requests | Internal retry/concurrency |
 | --- | ---: | --- |
-| TRON scan | 1,051 | 50 pages, 1,000 rows, at most 3 block requests concurrently |
+| TRON scan | 2,051 | 50 pages, 1,000 rows, one receipt and at most one block request per transaction, at most 3 concurrently |
 | EVM token/native scan | 1,004 / 4,001 | 3,000-block lookback, at most 1,000 matching events; sequential ranges |
 | EVM direct lookup | 4 | Three initial reads in parallel, one block read, all under one deadline |
 | TON / Aptos scan | 50 | Sequential pages, no adapter retry |
@@ -64,7 +64,7 @@ These are request ceilings, not expected request counts; the shared deadline
 normally terminates slow scans much earlier. The Payment Queue allows two
 concurrent consumer invocations and two concurrent payment messages per
 invocation, so at most four orders execute provider operations concurrently.
-Within that bound, TRON can issue at most 12 block-enrichment requests and an EVM
+Within that bound, TRON can issue at most 12 receipt or block requests and an EVM
 scan can have at most eight HTTP/WSS operations in flight; the other adapters are
 sequential per order. A payment message has one initial delivery plus at most five
 platform retries before DLQ. Adapters do not retry transient failures themselves;
@@ -190,6 +190,11 @@ Required confirmations belong to the payment method. Provider-account adapters n
 - Receiving target: a Base58Check address beginning with `T`
 - Native asset: TRX, 6 decimals
 - Seeded token: USDT TRC20, 6 decimals
+- TRC20 transfers count only from the configured token contract. Scheduled
+  scans (TronGrid or a node `/jsonrpc` endpoint) and payer-submitted hashes read
+  the same transaction receipt; a transfer's event index is its log position in
+  that receipt. Hashes are normalized to 64 lowercase hex characters, so letter
+  case and a `0x` prefix do not create a different transaction.
 
 RPC node fields:
 
@@ -374,11 +379,19 @@ The automated quality gates use sanitized fixtures and never require network cre
 
 ### Shared-address payment attribution and review
 
-An already-recorded transfer keeps its original order. Unrecorded transfers cannot
-belong to orders created after the transfer. Exact remaining amounts still match
+An already-recorded transfer keeps its original order. One transfer to one
+receiving address credits at most one order payment: the same transaction hash,
+in any letter case or with a `0x` prefix, is recognized under any event index,
+so a repeated scan, push event, or payer-submitted hash returns the existing
+owner instead of crediting another order. A second transfer to the same address
+inside an already credited transaction is retained for review. Unrecorded
+transfers cannot belong to orders created after the transfer. Exact remaining amounts still match
 retained collision locks (including late payments). For non-exact amounts, a unique
 unpaid checkout window containing the chain timestamp takes precedence over expired
-historical locks. Concurrent eligible windows remain ambiguous: the scan's order ID
+historical locks, but only while the amount stays below the order's remaining
+balance. A non-exact amount that would settle or overpay an order is retained for
+review; a payer can submit a payment review and an approving operator credits it.
+Concurrent eligible windows remain ambiguous: the scan's order ID
 is never a tie-breaker. Late accounting continues to follow the configured policy.
 
 Before a scan acknowledges an ambiguous or unmatched transfer, it atomically saves

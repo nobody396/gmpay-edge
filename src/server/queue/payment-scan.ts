@@ -3,6 +3,7 @@ import {
 	PaymentAttributionAmbiguousError,
 	PaymentAttributionNotFoundError,
 	resolvePaymentTransactionOrder,
+	transactionHashKey,
 } from "#/features/payments/server/attribution";
 import { recordPaymentTransaction } from "#/features/payments/server/process";
 import { retainUnattributedPayment } from "#/features/payments/server/unattributed";
@@ -315,23 +316,35 @@ async function findCurrentTransactionEvent(
 	adapter: PaymentAdapter<unknown>,
 	stored: NormalizedTransaction,
 ) {
+	const lookup = { address: stored.to, assetCode: stored.assetCode };
 	const direct = await adapter.getTransaction(stored.hash, {
-		address: stored.to,
-		assetCode: stored.assetCode,
+		...lookup,
 		eventIndex: stored.eventIndex,
 	});
-	return sameTransactionEvent(direct, stored) ? direct : undefined;
+	if (direct)
+		return direct.network === stored.network &&
+			transactionHashKey(direct.hash) === transactionHashKey(stored.hash) &&
+			direct.eventIndex === stored.eventIndex
+			? storedIdentity(direct, stored)
+			: undefined;
+	// Earlier TRON scans stored event index 0 for every transfer. Such a row is
+	// re-identified by its recipient and amount when the receipt index differs.
+	if (stored.network !== "tron" || stored.eventIndex !== 0) return undefined;
+	const located = await adapter.getTransaction(stored.hash, lookup);
+	return located?.network === stored.network &&
+		transactionHashKey(located.hash) === transactionHashKey(stored.hash) &&
+		located.to === stored.to &&
+		located.amountUnits === stored.amountUnits
+		? storedIdentity(located, stored)
+		: undefined;
 }
 
-function sameTransactionEvent(
-	candidate: NormalizedTransaction | null | undefined,
+/** Adapters canonicalize hashes; keep the stored identity so accounting updates its row. */
+function storedIdentity(
+	current: NormalizedTransaction,
 	stored: NormalizedTransaction,
-) {
-	return (
-		candidate?.network === stored.network &&
-		candidate.hash === stored.hash &&
-		candidate.eventIndex === stored.eventIndex
-	);
+): NormalizedTransaction {
+	return { ...current, hash: stored.hash, eventIndex: stored.eventIndex };
 }
 
 function mergeScannedTransactions(...groups: NormalizedTransaction[][]) {

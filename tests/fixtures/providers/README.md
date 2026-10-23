@@ -8,4 +8,4 @@ These sanitized fixtures preserve the response shapes consumed by GMPay Edge wit
 
 Pagination tests generate additional rows around these canonical shapes. Live compatibility is checked separately by the opt-in smoke suite and never by default CI.
 
-Chain fixtures under `tests/fixtures/chains` follow the corresponding official RPC/indexer response contracts. The TRON event fixture intentionally uses the 32-byte TVM event address form to verify the required `41` prefix and Base58Check conversion, and preserves the provider `event_index` for transaction-event uniqueness.
+TRON adapter tests build receipt logs inline from the official `gettransactioninfobyid` contract. Log topics use the 32-byte TVM address form to verify the required `41` prefix and Base58Check conversion, and a transfer's event index is its log position inside the receipt for every scan transport and submitted hash.

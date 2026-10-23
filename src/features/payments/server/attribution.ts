@@ -42,7 +42,9 @@ export class PaymentAttributionNotFoundError extends DomainError {
  * Resolves a chain transfer before accounting so concurrent orders sharing one
  * receiving address cannot race to claim it. The persisted transaction owner is
  * authoritative; otherwise an exact remaining balance must be unique whenever
- * more than one order can receive the transfer.
+ * more than one order can receive the transfer. An inexact amount is only a
+ * guess: it may top up an open balance, but settling or overpaying an order with
+ * it needs an administrator-approved review.
  */
 export async function resolvePaymentTransactionOrder(
 	db: D1Database,
@@ -70,6 +72,14 @@ export async function resolvePaymentTransactionOrder(
 		return { orderId, alreadyAttributed };
 	};
 	if (existing) return result(existing.order_id, true);
+	const sameTransfer = await findSameTransferAttribution(db, transaction);
+	if (sameTransfer) {
+		if (sameTransfer.amount_units !== transaction.amountUnits.toString())
+			throw new PaymentAttributionAmbiguousError(
+				"payment_transfer_already_attributed",
+			);
+		return result(sameTransfer.order_id, true);
+	}
 
 	const caseInsensitiveTarget = isEvmAddress(transaction.to);
 	const targetPredicate = caseInsensitiveTarget
@@ -121,33 +131,77 @@ export async function resolvePaymentTransactionOrder(
 	const eligible = candidates.results.filter(
 		(candidate) => candidate.created_at <= observedSecondEnd,
 	);
+	const remainingUnits = (candidate: AttributionCandidate) =>
+		BigInt(candidate.expected_amount_units) -
+		BigInt(candidate.received_amount_units);
 	const exact = eligible.filter((candidate) => {
-		const remainingUnits =
-			BigInt(candidate.expected_amount_units) -
-			BigInt(candidate.received_amount_units);
-		return remainingUnits > 0n && remainingUnits === transaction.amountUnits;
+		const remaining = remainingUnits(candidate);
+		return remaining > 0n && remaining === transaction.amountUnits;
 	});
 	if (exact.length > 1) throw new PaymentAttributionAmbiguousError();
 	const [exactCandidate] = exact;
 	if (exactCandidate) return result(exactCandidate.order_id, false);
 	// Retained collision locks protect exact late payments, not non-exact payments
 	// made in a different checkout window. Never use the scanning order as a tie-break.
+	const inexact = (candidate: AttributionCandidate) => {
+		if (!allowReviewed && transaction.amountUnits >= remainingUnits(candidate))
+			throw new PaymentAttributionAmbiguousError(
+				"payment_amount_review_required",
+			);
+		return result(candidate.order_id, false);
+	};
 	const onTime = eligible.filter(
 		(candidate) =>
 			transaction.timestamp.getTime() <= candidate.expires_at &&
-			BigInt(candidate.received_amount_units) <
-				BigInt(candidate.expected_amount_units),
+			remainingUnits(candidate) > 0n,
 	);
 	const [onTimeCandidate] = onTime;
-	if (onTimeCandidate && onTime.length === 1)
-		return result(onTimeCandidate.order_id, false);
+	if (onTimeCandidate && onTime.length === 1) return inexact(onTimeCandidate);
 	if (onTime.length > 1 || eligible.length > 1)
 		throw new PaymentAttributionAmbiguousError();
 	// A sole late candidate is safe to pass to the existing late-payment policy.
 	const [onlyCandidate] = eligible;
-	if (onlyCandidate && eligible.length === 1)
-		return result(onlyCandidate.order_id, false);
+	if (onlyCandidate && eligible.length === 1) return inexact(onlyCandidate);
 	throw new PaymentAttributionNotFoundError();
+}
+
+/**
+ * One transfer to one receiving address credits at most one order payment.
+ * Providers have reported the same transfer under different event indexes, and
+ * payers paste hashes in any case or with `0x`, so the stored event identity
+ * alone cannot enforce this.
+ */
+export async function findSameTransferAttribution(
+	db: D1Database,
+	transaction: NormalizedTransaction,
+) {
+	const hash = transactionHashKey(transaction.hash);
+	const rows = await db
+		.prepare(
+			`SELECT op.order_id, op.amount_units, bt.to_address
+			 FROM blockchain_transactions bt INDEXED BY blockchain_transactions_hash_nocase_idx
+			 JOIN order_payments op
+			 ON op.transaction_id = bt.network || ':' || bt.tx_hash || ':' || bt.event_index
+			 WHERE bt.network = ? AND LOWER(bt.tx_hash) IN (?, ?)
+			 AND op.transaction_id <> ? LIMIT 20`,
+		)
+		.bind(
+			transaction.network,
+			hash,
+			`0x${hash}`,
+			paymentTransactionId(transaction),
+		)
+		.all<{ order_id: string; amount_units: string; to_address: string }>();
+	return (
+		rows.results.find((row) =>
+			paymentTargetAddressMatches(row.to_address, transaction.to),
+		) ?? null
+	);
+}
+
+/** Case- and `0x`-insensitive key for comparing a transaction hash across sources. */
+export function transactionHashKey(hash: string) {
+	return hash.replace(/^0x/i, "").toLowerCase();
 }
 
 export function paymentTargetAddressMatches(left: string, right: string) {

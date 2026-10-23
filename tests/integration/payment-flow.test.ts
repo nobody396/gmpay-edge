@@ -1,9 +1,14 @@
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { submitCheckoutTransaction } from "#/features/checkout/server/submit-transaction";
 import { queryAdminDashboard } from "#/features/dashboard/server/query";
 import { resolveLatePayment } from "#/features/payments/server/late-payment";
 import { recordPaymentTransaction } from "#/features/payments/server/process";
-import type { NormalizedTransaction } from "#/integrations/chains/types";
+import { TronAdapter } from "#/integrations/chains/tron";
+import type {
+	NormalizedTransaction,
+	PaymentAdapter,
+} from "#/integrations/chains/types";
 import {
 	processScannedTransactions,
 	refreshPendingPaymentTransactions,
@@ -972,16 +977,19 @@ describe("D1 payment processing flow", () => {
 				confirmations: 2,
 			}),
 		]);
-		expect(result.skippedAmbiguous).toBe(0);
+		const overpaid = amountUnits > 159_290_000n;
+		// Only an exact or underpaying transfer may be guessed onto an open order.
+		expect(result.skippedAmbiguous).toBe(overpaid ? 1 : 0);
 		expect(
 			await db
 				.prepare("SELECT status,received_amount_units FROM orders WHERE id=?")
 				.bind(current)
 				.first(),
-		).toEqual({
-			status: amountUnits > 159_290_000n ? "overpaid" : "partially_paid",
-			received_amount_units: suffix,
-		});
+		).toEqual(
+			overpaid
+				? { status: "pending", received_amount_units: "0" }
+				: { status: "partially_paid", received_amount_units: suffix },
+		);
 		expect(
 			await db
 				.prepare("SELECT received_amount_units FROM orders WHERE id=?")
@@ -1169,7 +1177,355 @@ describe("D1 payment processing flow", () => {
 			]),
 		).rejects.toThrow("evidence write unavailable");
 	});
+
+	it.each([
+		["another event index", (hash: string) => ({ hash, eventIndex: 2 })],
+		[
+			"an uppercase hash",
+			(hash: string) => ({ hash: hash.toUpperCase(), eventIndex: 0 }),
+		],
+		["a 0x-prefixed hash", (hash: string) => ({ hash: `0x${hash}` })],
+	])("never credits one transfer to a second order through %s", async (label, variant) => {
+		const now = Date.now();
+		const suffix = label.replaceAll(/[^a-z0-9]/g, "").slice(0, 12);
+		const target = `TOneTransfer${suffix}`;
+		const hash = hexHash(`one-${suffix}`);
+		const orderA = numericOrderId(`a${suffix}`);
+		const orderB = numericOrderId(`b${suffix}`);
+		await insertOrderWithSnapshot(db, {
+			id: orderA,
+			externalOrderId: `one-a-${suffix}`,
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			now: now - 2000,
+		});
+		await insertOrderWithSnapshot(db, {
+			id: orderB,
+			externalOrderId: `one-b-${suffix}`,
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			expectedAmountUnits: "10000001",
+			now: now - 1000,
+		});
+		const paid = transaction({
+			hash,
+			to: target,
+			timestamp: new Date(now),
+			confirmations: 2,
+		});
+		await processScannedTransactions(env, orderA, [paid]);
+		const replay = { ...paid, ...variant(hash) };
+
+		await expect(
+			processScannedTransactions(env, orderB, [replay]),
+		).resolves.toMatchObject({ skippedPreviouslyAttributed: 1 });
+		await expect(
+			submitCheckoutTransaction(
+				env,
+				{ orderId: orderB, transactionHash: replay.hash },
+				async () => [{ adapter: fixedAdapter(replay) }],
+			),
+		).resolves.toEqual({ status: "mismatch" });
+		await expect(
+			recordPaymentTransaction(env, orderB, replay),
+		).rejects.toMatchObject({ code: "transaction_already_attributed" });
+
+		const orders = await db
+			.prepare(
+				"SELECT id, status, received_amount_units FROM orders WHERE id IN (?, ?) ORDER BY id = ? DESC",
+			)
+			.bind(orderA, orderB, orderA)
+			.all();
+		expect(orders.results).toEqual([
+			{ id: orderA, status: "paid", received_amount_units: "10000000" },
+			{ id: orderB, status: "pending", received_amount_units: "0" },
+		]);
+	});
+
+	it("counts one transfer once when it reappears under its receipt event index", async () => {
+		const now = Date.now();
+		const target = "TLegacyIdentity111111111111111111";
+		const hash = hexHash("legacy-identity");
+		await insertOrderWithSnapshot(db, {
+			id: "order-legacy-identity",
+			externalOrderId: "merchant-legacy-identity",
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			now: now - 1000,
+		});
+		const legacy = transaction({
+			hash,
+			to: target,
+			timestamp: new Date(now),
+			confirmations: 1,
+		});
+		await recordPaymentTransaction(env, "order-legacy-identity", legacy);
+		await processScannedTransactions(env, "order-legacy-identity", [
+			{ ...legacy, eventIndex: 3, confirmations: 2 },
+		]);
+		expect(
+			await db
+				.prepare(
+					`SELECT o.received_amount_units,
+					 (SELECT COUNT(*) FROM order_payments WHERE order_id = o.id) AS payments
+					 FROM orders o WHERE o.id = 'order-legacy-identity'`,
+				)
+				.first(),
+		).toEqual({ received_amount_units: "10000000", payments: 1 });
+
+		// The stored legacy identity still refreshes when the provider only
+		// returns the transfer under its receipt event index.
+		const refreshed = await refreshPendingPaymentTransactions(
+			db,
+			"order-legacy-identity",
+			fixedAdapter({ ...legacy, eventIndex: 3, confirmations: 5 }, true),
+		);
+		expect(refreshed).toEqual([
+			expect.objectContaining({ hash, eventIndex: 0, confirmations: 5 }),
+		]);
+	});
+
+	it("refreshes TRON confirmations for a transfer that is not the first receipt log", async () => {
+		const now = Date.now();
+		const target = "TXLAQ63Xg1NAzckPwKHvzw7CSEmLMEqcdj";
+		const targetTopic =
+			"000000000000000000000000ea51342dabbb928ae1e576bd39eff8aaf070a8c6";
+		const transferTopic =
+			"ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+		const usdtLog = (toTopic: string) => ({
+			address: "a614f803b6fd780986a42c78ec9c7f77e6ded13c",
+			topics: [transferTopic, "0".repeat(64), toTopic],
+			data: "989680",
+		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				const body = JSON.parse(String(init?.body ?? "{}")) as {
+					value?: string;
+					num?: number;
+				};
+				if (url.endsWith("/wallet/getnowblock"))
+					return Response.json({
+						blockID: "head",
+						block_header: { raw_data: { number: 130 } },
+					});
+				if (url.endsWith("/wallet/getblockbynum"))
+					return Response.json({
+						blockID: "canonical",
+						block_header: { raw_data: { number: body.num } },
+					});
+				if (url.endsWith("/wallet/gettransactioninfobyid"))
+					return Response.json({
+						id: body.value,
+						blockNumber: 100,
+						blockTimeStamp: now,
+						receipt: { result: "SUCCESS" },
+						log: [
+							usdtLog("0".repeat(64)),
+							usdtLog("0".repeat(64)),
+							usdtLog(targetTopic),
+						],
+					});
+				throw new Error(`Unexpected TRON request ${url}`);
+			}),
+		);
+		const adapter = new TronAdapter({
+			apiUrl: "https://api.trongrid.io",
+			tokens: {
+				USDT: { contract: "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t", decimals: 6 },
+			},
+		});
+		try {
+			for (const [id, eventIndex] of [
+				["order-tron-receipt-legacy", 0],
+				["order-tron-receipt-current", 2],
+			] as const) {
+				await insertOrderWithSnapshot(db, {
+					id,
+					externalOrderId: id,
+					status: "pending",
+					target,
+					expiresAt: now + 900_000,
+					now: now - 1000,
+				});
+				const stored = transaction({
+					hash: hexHash(id),
+					eventIndex,
+					to: target,
+					timestamp: new Date(now),
+					confirmations: 1,
+				});
+				await recordPaymentTransaction(env, id, stored);
+				await expect(
+					refreshPendingPaymentTransactions(db, id, adapter),
+				).resolves.toEqual([
+					expect.objectContaining({
+						hash: stored.hash,
+						eventIndex,
+						amountUnits: 10_000_000n,
+						confirmations: 31,
+					}),
+				]);
+			}
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
+	it("retains a second same-address transfer in one transaction for review", async () => {
+		const now = Date.now();
+		const target = "TSecondTransfer11111111111111111";
+		const hash = hexHash("second-transfer");
+		const first = numericOrderId("second-a");
+		const second = numericOrderId("second-b");
+		await insertOrderWithSnapshot(db, {
+			id: first,
+			externalOrderId: "second-transfer-a",
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			now: now - 2000,
+		});
+		await insertOrderWithSnapshot(db, {
+			id: second,
+			externalOrderId: "second-transfer-b",
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			expectedAmountUnits: "7000000",
+			now: now - 1000,
+		});
+		const base = transaction({
+			hash,
+			to: target,
+			timestamp: new Date(now),
+			confirmations: 2,
+		});
+		const result = await processScannedTransactions(env, first, [
+			{ ...base, eventIndex: 1 },
+			{ ...base, eventIndex: 4, amountUnits: 7_000_000n },
+		]);
+		expect(result).toEqual({
+			skippedPreviouslyAttributed: 0,
+			skippedAmbiguous: 1,
+		});
+		expect(
+			await db
+				.prepare("SELECT status FROM orders WHERE id = ?")
+				.bind(second)
+				.first(),
+		).toEqual({ status: "pending" });
+	});
+
+	it("routes an inexact overpayment to review instead of the sole open order", async () => {
+		const now = Date.now();
+		const target = "TInexactOverpay111111111111111111";
+		const overpayId = numericOrderId("inexact-overpay");
+		await insertOrderWithSnapshot(db, {
+			id: overpayId,
+			externalOrderId: "merchant-inexact-overpay",
+			status: "pending",
+			target,
+			expiresAt: now + 900_000,
+			expectedAmountUnits: "5000000",
+			now: now - 1000,
+		});
+		const overpayment = transaction({
+			hash: hexHash("inexact-overpay"),
+			to: target,
+			amountUnits: 100_000_000n,
+			timestamp: new Date(now),
+			confirmations: 2,
+		});
+		const state = () =>
+			db
+				.prepare(
+					"SELECT status, received_amount_units FROM orders WHERE id = ?",
+				)
+				.bind(overpayId)
+				.first();
+		await expect(
+			processScannedTransactions(env, overpayId, [overpayment]),
+		).resolves.toEqual({
+			skippedPreviouslyAttributed: 0,
+			skippedAmbiguous: 1,
+		});
+		const adapters = async () => [{ adapter: fixedAdapter(overpayment) }];
+		await expect(
+			submitCheckoutTransaction(
+				env,
+				{ orderId: overpayId, transactionHash: overpayment.hash },
+				adapters,
+			),
+		).resolves.toEqual({ status: "mismatch" });
+		expect(await state()).toEqual({
+			status: "pending",
+			received_amount_units: "0",
+		});
+		// Administrator review approval verifies through the late-capable path.
+		await expect(
+			submitCheckoutTransaction(
+				env,
+				{ orderId: overpayId, transactionHash: overpayment.hash },
+				adapters,
+				true,
+			),
+		).resolves.toMatchObject({ status: "accepted", orderStatus: "overpaid" });
+	});
 });
+
+function hexHash(seed: string) {
+	return Array.from(seed.padEnd(32, "-"), (character) =>
+		character.charCodeAt(0).toString(16).padStart(2, "0"),
+	)
+		.join("")
+		.slice(0, 64);
+}
+
+function numericOrderId(seed: string) {
+	let value = 0n;
+	for (const character of seed)
+		value = value * 131n + BigInt(character.charCodeAt(0));
+	return (value % 10n ** 20n).toString().padStart(20, "1");
+}
+
+function fixedAdapter(
+	observed: NormalizedTransaction,
+	requireReceiptIndex = false,
+): PaymentAdapter<unknown> {
+	return {
+		id: "test",
+		network: "tron",
+		configSchema: {} as PaymentAdapter<unknown>["configSchema"],
+		validateConfig: (value) => value,
+		createPaymentTarget: async ({ address, expiresAt }) => ({
+			address,
+			expiresAt,
+		}),
+		getTransaction: async (_hash, lookup) =>
+			requireReceiptIndex &&
+			lookup?.eventIndex != null &&
+			lookup.eventIndex !== observed.eventIndex
+				? null
+				: observed,
+		findTransactions: async () => [],
+		validateAddress: () => true,
+		validatePayment: (payment, target, assetCode) =>
+			payment.to === target.address && payment.assetCode === assetCode,
+		getConfirmations: async (payment) => payment.confirmations,
+		healthCheck: async () => ({
+			healthy: true,
+			latencyMs: 0,
+			checkedAt: new Date(),
+		}),
+		classifyError: () => "permanent",
+		isRetryable: () => false,
+	};
+}
 
 function transaction(
 	overrides: Partial<NormalizedTransaction>,

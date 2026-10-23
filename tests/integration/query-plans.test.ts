@@ -154,6 +154,23 @@ describe("hot list query plans", () => {
 		expect(details).not.toContain("USE TEMP B-TREE");
 	});
 
+	it("seeks same-transfer attribution by network and normalized hash", async () => {
+		const details = await explain(
+			db,
+			`SELECT op.order_id, op.amount_units, bt.to_address
+			 FROM blockchain_transactions bt INDEXED BY blockchain_transactions_hash_nocase_idx
+			 JOIN order_payments op
+			 ON op.transaction_id = bt.network || ':' || bt.tx_hash || ':' || bt.event_index
+			 WHERE bt.network = 'tron' AND LOWER(bt.tx_hash) IN ('ab', '0xab')
+			 AND op.transaction_id <> 'tron:ab:0' LIMIT 20`,
+		);
+		expect(details).toContain(
+			"SEARCH bt USING INDEX blockchain_transactions_hash_nocase_idx (network=? AND <expr>=?)",
+		);
+		expect(details).toMatch(/SEARCH op USING (COVERING )?INDEX/);
+		expect(details).not.toContain("SCAN");
+	});
+
 	it("uses bounded indexes for provider event recovery and address matching", async () => {
 		const outbox = await explain(
 			db,
