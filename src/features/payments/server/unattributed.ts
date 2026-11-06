@@ -1,7 +1,10 @@
 import { paymentTransactionId } from "#/features/payments/server/reconciliation";
 import type { NormalizedTransaction } from "#/integrations/chains/types";
 
-/** Persist evidence before acknowledging a scan or advancing its cursor. No money moves. */
+/**
+ * Persist evidence before acknowledging a scan or advancing its cursor. No money moves.
+ * Returns true only the first time this transfer is retained, so callers alert once.
+ */
 export async function retainUnattributedPayment(
 	db: D1Database,
 	transaction: NormalizedTransaction,
@@ -10,7 +13,7 @@ export async function retainUnattributedPayment(
 	const now = Date.now();
 	const transactionId = paymentTransactionId(transaction);
 	const id = `unattributed:${transactionId}`;
-	await db.batch([
+	const results = await db.batch([
 		db
 			.prepare(`INSERT INTO blockchain_transactions
 		 (id,network,tx_hash,event_index,from_address,to_address,asset_code,amount_units,
@@ -48,4 +51,5 @@ export async function retainUnattributedPayment(
 				now,
 			),
 	]);
+	return (results[1]?.meta.changes ?? 0) === 1;
 }

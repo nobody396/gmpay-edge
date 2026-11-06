@@ -5,6 +5,7 @@ import {
 	createPaymentReview,
 	PaymentReviewError,
 } from "#/features/payment-reviews/server/create";
+import { alertPaymentReviewSubmitted } from "#/features/payments/server/owner-alert";
 import { isSameOriginRequest } from "#/server/api-boundaries";
 import { getEnv } from "#/server/db.server";
 import { json, withRequestId } from "#/server/http";
@@ -55,12 +56,15 @@ export const Route = createFileRoute("/api/checkout/$orderId/review")({
 					const evidence = form.get("evidence");
 					if (!(evidence instanceof File))
 						return response(request, "invalid_evidence", 422);
+					const review = {
+						orderId: params.orderId,
+						description: String(form.get("description") ?? "").trim(),
+						transactionHash:
+							String(form.get("transactionHash") ?? "").trim() || undefined,
+					};
 					const result = await createPaymentReview(
 						{
-							orderId: params.orderId,
-							description: String(form.get("description") ?? ""),
-							transactionHash:
-								String(form.get("transactionHash") ?? "").trim() || undefined,
+							...review,
 							evidence: await evidence.arrayBuffer(),
 							claimedContentType: evidence.type,
 						},
@@ -71,6 +75,7 @@ export const Route = createFileRoute("/api/checkout/$orderId/review")({
 							ipAddress: request.headers.get("cf-connecting-ip"),
 						},
 					);
+					await alertPaymentReviewSubmitted(env, review);
 					return withRequestId(
 						request,
 						json({ data: result }, { status: 201 }),
