@@ -49,7 +49,14 @@ export const submitCheckoutTransactionFn = createServerFn({ method: "POST" })
 				"Checkout is unavailable",
 			);
 		return submitCheckoutTransactionForRequest(
-			{ DB: env.DB, WEBHOOK_QUEUE: env.WEBHOOK_QUEUE },
+			{
+				DB: env.DB,
+				WEBHOOK_QUEUE: env.WEBHOOK_QUEUE,
+				// Automatic settlements from a submitted hash notify the owner too.
+				OWNER_ALERT_TELEGRAM_BOT_TOKEN: env.OWNER_ALERT_TELEGRAM_BOT_TOKEN,
+				OWNER_ALERT_TELEGRAM_CHAT_ID: env.OWNER_ALERT_TELEGRAM_CHAT_ID,
+				OWNER_ALERT_TELEGRAM_THREAD_ID: env.OWNER_ALERT_TELEGRAM_THREAD_ID,
+			},
 			data,
 			request.headers.get("cf-connecting-ip") ?? "unknown",
 		);

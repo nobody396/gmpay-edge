@@ -14,7 +14,15 @@ export type WebhookDelivery = {
 	endpoint: WebhookEndpoint;
 };
 
-export type PaymentRuntime = Pick<Env, "DB" | "WEBHOOK_QUEUE">;
+export type PaymentRuntime = Pick<Env, "DB" | "WEBHOOK_QUEUE"> &
+	Partial<
+		Pick<
+			Env,
+			| "OWNER_ALERT_TELEGRAM_BOT_TOKEN"
+			| "OWNER_ALERT_TELEGRAM_CHAT_ID"
+			| "OWNER_ALERT_TELEGRAM_THREAD_ID"
+		>
+	>;
 
 export async function matchingWebhookEndpoints(
 	db: D1Database,

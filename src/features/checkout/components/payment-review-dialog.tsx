@@ -71,9 +71,18 @@ export function PaymentReviewDialog({
 								{ method: "POST", body: form },
 							);
 							if (!response.ok) throw new Error("review_failed");
+							const body = (await response.json().catch(() => null)) as {
+								data?: { status?: string };
+							} | null;
 							toast.success(m.checkout_review_submitted());
-							onSubmitted();
 							setOpen(false);
+							// A verified hash can settle the order on the spot; reload the
+							// authoritative order so the page shows payment and redirects.
+							if (body?.data?.status === "approved") {
+								window.location.reload();
+								return;
+							}
+							onSubmitted();
 						} catch {
 							toast.error(m.checkout_review_failed());
 						} finally {

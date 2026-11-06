@@ -1,3 +1,8 @@
+import {
+	autoApprovalApplies,
+	automaticSettlementBlocker,
+	couldOwnTransfer,
+} from "#/features/payments/server/auto-approval";
 import { paymentTransactionId } from "#/features/payments/server/reconciliation";
 import type { NormalizedTransaction } from "#/integrations/chains/types";
 import { DomainError } from "#/lib/domain-error";
@@ -9,6 +14,14 @@ type AttributionCandidate = {
 	received_amount_units: string;
 	created_at: number;
 	expires_at: number;
+	amount_minor: string;
+	currency: string;
+	asset_code: string;
+	decimals: number;
+	status: string;
+	rail_kind: string;
+	rail_code: string;
+	contract_address: string | null;
 };
 
 function isEvmAddress(value: string) {
@@ -44,13 +57,16 @@ export class PaymentAttributionNotFoundError extends DomainError {
  * authoritative; otherwise an exact remaining balance must be unique whenever
  * more than one order can receive the transfer. An inexact amount is only a
  * guess: it may top up an open balance, but settling or overpaying an order with
- * it needs an administrator-approved review.
+ * it needs an administrator-approved review — unless the order qualifies for
+ * automatic approval and it is the only open order that could own the transfer.
  */
 export async function resolvePaymentTransactionOrder(
 	db: D1Database,
 	transaction: NormalizedTransaction,
 	preferredOrderId?: string,
 	allowReviewed = false,
+	/** The pending review being decided automatically right now. */
+	reviewId?: string,
 ): Promise<PaymentAttribution> {
 	const existing = await db
 		.prepare(
@@ -62,9 +78,9 @@ export async function resolvePaymentTransactionOrder(
 		if (!allowReviewed) {
 			const review = await db
 				.prepare(`SELECT 1 FROM payment_reviews WHERE order_id = ?
-			 AND status IN ('pending','rejected')
+			 AND status IN ('pending','rejected') AND id <> ?
 			 AND (transaction_hash IS NULL OR lower(transaction_hash) = lower(?)) LIMIT 1`)
-				.bind(orderId, transaction.hash)
+				.bind(orderId, reviewId ?? "", transaction.hash)
 				.first();
 			if (review)
 				throw new PaymentAttributionAmbiguousError("payment_review_pending");
@@ -91,7 +107,9 @@ export async function resolvePaymentTransactionOrder(
 	const candidates = await db
 		.prepare(
 			`SELECT DISTINCT o.id AS order_id, o.received_amount_units,
-			 ops.expected_amount_units, o.created_at, o.expires_at
+			 ops.expected_amount_units, o.created_at, o.expires_at,
+			 o.amount_minor, o.currency, ops.asset_code, ops.decimals, o.status,
+			 ops.rail_kind, ops.rail_code, ops.contract_address
 			 FROM order_payment_snapshots ops INDEXED BY ${targetIndex}
 			 JOIN orders o ON o.id = ops.order_id
 			 LEFT JOIN receiving_method_locks lock
@@ -134,16 +152,53 @@ export async function resolvePaymentTransactionOrder(
 	const remainingUnits = (candidate: AttributionCandidate) =>
 		BigInt(candidate.expected_amount_units) -
 		BigInt(candidate.received_amount_units);
-	const exact = eligible.filter((candidate) => {
+	// An order already settled (possibly within the underpayment tolerance)
+	// never claims another transfer.
+	const open = eligible.filter(
+		(candidate) =>
+			candidate.status !== "paid" && candidate.status !== "overpaid",
+	);
+	const exact = open.filter((candidate) => {
 		const remaining = remainingUnits(candidate);
 		return remaining > 0n && remaining === transaction.amountUnits;
 	});
 	if (exact.length > 1) throw new PaymentAttributionAmbiguousError();
 	const [exactCandidate] = exact;
 	if (exactCandidate) return result(exactCandidate.order_id, false);
+	// Automatic approval: exactly one open order could own this amount and the
+	// settlement authority, which also checks orders this query cannot see,
+	// accepts it. Anything else stays a guess for a person.
+	const plausible = open.filter((candidate) =>
+		couldOwnTransfer(
+			candidate.decimals,
+			remainingUnits(candidate),
+			transaction.amountUnits,
+		),
+	);
+	const [sole] = plausible;
+	if (sole && plausible.length === 1 && autoApprovalApplies(sole)) {
+		const blocker = await automaticSettlementBlocker(db, {
+			orderId: sole.order_id,
+			transaction,
+			...(reviewId ? { reviewId } : {}),
+		});
+		if (blocker === null) return result(sole.order_id, false);
+		// Another order this query cannot see could own the money: no guess at all.
+		if (blocker === "competing_orders" && !allowReviewed)
+			throw new PaymentAttributionAmbiguousError();
+	}
 	// Retained collision locks protect exact late payments, not non-exact payments
 	// made in a different checkout window. Never use the scanning order as a tie-break.
 	const inexact = (candidate: AttributionCandidate) => {
+		// A near-complete payment would settle an auto-approvable order through
+		// the underpayment tolerance; never let a guess between owners do that.
+		if (
+			!allowReviewed &&
+			plausible.length > 1 &&
+			autoApprovalApplies(candidate) &&
+			plausible.includes(candidate)
+		)
+			throw new PaymentAttributionAmbiguousError();
 		if (!allowReviewed && transaction.amountUnits >= remainingUnits(candidate))
 			throw new PaymentAttributionAmbiguousError(
 				"payment_amount_review_required",

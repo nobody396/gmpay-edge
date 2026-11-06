@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { claimCheckoutRateLimit } from "#/features/checkout/server/rate-limit";
 import { mapCheckoutReviewError } from "#/features/checkout/server/review-errors";
+import { autoApprovePaymentReview } from "#/features/payment-reviews/server/auto-approve";
 import {
 	createPaymentReview,
 	PaymentReviewError,
@@ -75,10 +76,24 @@ export const Route = createFileRoute("/api/checkout/$orderId/review")({
 							ipAddress: request.headers.get("cf-connecting-ip"),
 						},
 					);
-					await alertPaymentReviewSubmitted(env, review);
+					// A verifiable, settling transaction needs no person; the
+					// owner still gets one message either way.
+					const automatic = await autoApprovePaymentReview(
+						env,
+						result.id,
+					).catch(() => ({ approved: false }));
+					if (!automatic.approved)
+						await alertPaymentReviewSubmitted(env, review);
 					return withRequestId(
 						request,
-						json({ data: result }, { status: 201 }),
+						json(
+							{
+								data: automatic.approved
+									? { ...result, status: "approved" as const }
+									: result,
+							},
+							{ status: 201 },
+						),
 					);
 				} catch (error) {
 					const mapped = mapCheckoutReviewError(error);

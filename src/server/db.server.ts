@@ -9,6 +9,9 @@ export type AppBindings = {
 	WEBHOOK_QUEUE?: Queue;
 	PAYMENT_QUEUE?: Queue;
 	EMAIL?: SendEmail;
+	OWNER_ALERT_TELEGRAM_BOT_TOKEN?: string;
+	OWNER_ALERT_TELEGRAM_CHAT_ID?: string;
+	OWNER_ALERT_TELEGRAM_THREAD_ID?: string;
 };
 
 export function getCloudflareEnv(_request?: Request) {

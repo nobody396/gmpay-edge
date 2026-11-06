@@ -6,9 +6,21 @@ import {
 	transactionHashKey,
 } from "#/features/payments/server/attribution";
 import {
+	autoApprovalPolicy,
+	automaticSettlementBlocker,
+	underpaymentToleranceFor,
+} from "#/features/payments/server/auto-approval";
+import {
 	displayOrderAmounts,
 	type StoredOrderAmounts,
 } from "#/features/payments/server/order-amounts";
+import {
+	alertUnattributedPayment,
+	automaticSettlementAlertText,
+	deliverOwnerAlert,
+	ownerAlertConfigured,
+	ownerAlertStatement,
+} from "#/features/payments/server/owner-alert";
 import {
 	dispatchPaymentNotifications,
 	matchingWebhookEndpoints,
@@ -33,10 +45,16 @@ export async function recordPaymentTransaction(
 	orderId: string,
 	transaction: NormalizedTransaction,
 	runtime?: RuntimeConfig,
+	options: {
+		ownerAlert?: boolean;
+		/** Approve this pending review in the same transaction as the payment. */
+		review?: { id: string; description: string };
+	} = {},
 ): Promise<{ duplicate: boolean; status: OrderStatus }> {
 	const storedOrder = await env.DB.prepare(
 		`SELECT o.id, o.external_order_id, o.status, o.amount_minor,
 		 o.currency, o.currency_decimals, o.received_amount_units, o.expires_at, o.version,
+		 o.created_at,
 		 ops.expected_amount_units, ops.asset_code AS code, ops.rail_code AS network, ops.decimals,
 		 ops.target_value AS address, ops.required_confirmations
 		 FROM orders o
@@ -53,6 +71,7 @@ export async function recordPaymentTransaction(
 				received_amount_units: string;
 				expires_at: number;
 				version: number;
+				created_at: number;
 				code: string;
 				network: string;
 				decimals: number;
@@ -92,19 +111,56 @@ export async function recordPaymentTransaction(
 			throw new PaymentAttributionConflictError();
 		return { duplicate: true, status: order.status };
 	}
-	if (order.status === "expired" || order.status === "cancelled") {
+	const transactionId = paymentTransactionId(transaction);
+	const expectedUnits = BigInt(order.expected_amount_units);
+	const remainingUnits = expectedUnits - BigInt(order.received_amount_units);
+	// Automatic settlement only matters where the normal rules would stop:
+	// a late, inexact or customer-reviewed transfer on a recent CNY order.
+	const automatic =
+		order.currency === autoApprovalPolicy.currency &&
+		order.created_at >= autoApprovalPolicy.ordersCreatedFromMs &&
+		(order.status === "expired" ||
+			transaction.amountUnits !== remainingUnits ||
+			options.review !== undefined) &&
+		(await automaticSettlementBlocker(env.DB, {
+			orderId,
+			transaction,
+			...(options.review ? { reviewId: options.review.id } : {}),
+			...(options.review ? { requireFinal: true } : {}),
+		})) === null;
+	if (options.review && !automatic)
+		throw new DomainError(
+			"automatic_review_not_allowed",
+			409,
+			"Payment review needs a person",
+		);
+	if (
+		(order.status === "expired" && !automatic) ||
+		order.status === "cancelled"
+	) {
 		const policy = (await loadOperationalSettings(env.DB)).latePaymentPolicy;
 		if (policy !== "accept") {
-			return recordLatePayment(
+			const late = await recordLatePayment(
 				env,
 				{ ...order, paymentAmount: order.paymentAmount },
 				transaction,
 				policy,
 			);
+			if (
+				!late.duplicate &&
+				policy === "review" &&
+				options.ownerAlert !== false
+			)
+				await alertUnattributedPayment(
+					env,
+					transaction,
+					"payment_late_review_required",
+					orderId,
+				);
+			return late;
 		}
 	}
 
-	const transactionId = paymentTransactionId(transaction);
 	const existingPayment = await env.DB.prepare(
 		`SELECT op.id, op.order_id, op.amount_units, op.confirmations, op.status,
 		 bt.block_hash, bt.status AS blockchain_status
@@ -185,8 +241,11 @@ export async function recordPaymentTransaction(
 			status: PaymentAggregate["status"];
 		}>();
 	const aggregate = reconcileOrderPayment({
-		expectedUnits: BigInt(order.expected_amount_units),
+		expectedUnits,
 		requiredConfirmations: order.required_confirmations,
+		underpaymentToleranceUnits: automatic
+			? underpaymentToleranceFor(order.decimals)
+			: 0n,
 		payments: [
 			...prior.results.map((payment) => ({
 				amountUnits: BigInt(payment.amount_units),
@@ -355,6 +414,80 @@ export async function recordPaymentTransaction(
 			).bind(id, eventId, orderId, endpoint.api_key_id, now, now),
 		),
 	];
+	const settled = (status: OrderStatus) =>
+		status === "paid" || status === "overpaid";
+	const settlesNow = settled(aggregate.status) && !settled(order.status);
+	if (options.review && !settlesNow)
+		throw new DomainError(
+			"automatic_review_not_settled",
+			409,
+			"Payment review needs a person",
+		);
+	// The owner message is written in the same transaction as the settlement
+	// and delivered afterwards, so a Telegram outage cannot lose it.
+	let alertId: string | null = null;
+	if (automatic && settlesNow && options.ownerAlert !== false) {
+		const text = await automaticSettlementAlertText(env.DB, {
+			orderId,
+			transaction,
+			receivedUnits: aggregate.receivedUnits,
+			lateByMs:
+				order.status === "expired"
+					? transaction.timestamp.getTime() - order.expires_at
+					: null,
+			...(options.review
+				? { reviewDescription: options.review.description }
+				: {}),
+		});
+		if (text && ownerAlertConfigured(env)) {
+			alertId = options.review
+				? `auto-review:${options.review.id}`
+				: `auto-settle:${orderId}`;
+			statements.push(ownerAlertStatement(env.DB, alertId, text, now));
+		}
+	}
+	// A review opened or decided after the authority ran still stops an
+	// automatic settlement: re-check inside the transaction.
+	if (automatic)
+		statements.push(
+			env.DB.prepare(
+				`SELECT CASE WHEN EXISTS (SELECT 1 FROM payment_reviews
+				 WHERE order_id = ? AND status IN ('pending','rejected') AND id <> ?)
+				 THEN json_extract('payment review opened', '$') ELSE 1 END`,
+			).bind(orderId, options.review?.id ?? ""),
+		);
+	if (options.review)
+		statements.push(
+			env.DB.prepare(
+				`UPDATE payment_reviews SET status = 'approved', reviewer_user_id = NULL,
+				 resolution_note = ?, reviewed_at = ?, updated_at = ?
+				 WHERE id = ? AND order_id = ? AND status = 'pending'`,
+			).bind(
+				`系统自动核验通过：链上交易 ${transactionId} 已确认并入账`,
+				now,
+				now,
+				options.review.id,
+				orderId,
+			),
+			// A person decided first: roll the whole settlement back.
+			env.DB.prepare(
+				`SELECT CASE WHEN changes() = 1 THEN 1
+				 ELSE json_extract('payment review changed', '$') END`,
+			),
+			env.DB.prepare(
+				`INSERT INTO audit_logs (id, action, target_type, target_id, after, created_at)
+				 VALUES (?, 'payment_review.auto_approved', 'payment_review', ?, ?, ?)`,
+			).bind(
+				crypto.randomUUID(),
+				options.review.id,
+				JSON.stringify({
+					orderId,
+					transactionId,
+					orderStatus: aggregate.status,
+				}),
+				now,
+			),
+		);
 	try {
 		await env.DB.batch(statements);
 	} catch (error) {
@@ -408,5 +541,6 @@ export async function recordPaymentTransaction(
 		deliveries,
 		eventType,
 	);
+	if (alertId) await deliverOwnerAlert(env, alertId);
 	return { duplicate: false, status: aggregate.status };
 }

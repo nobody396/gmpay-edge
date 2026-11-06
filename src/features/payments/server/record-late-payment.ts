@@ -1,4 +1,5 @@
 import type { OrderStatus } from "#/features/orders/schema";
+import { transactionHashKey } from "#/features/payments/server/attribution";
 import {
 	dispatchPaymentNotifications,
 	matchingWebhookEndpoints,
@@ -79,10 +80,19 @@ export async function recordLatePayment(
 	const results = await db.batch([
 		db
 			.prepare(
+				// Same guard as normal accounting: the same transfer under another
+				// event identity (index, hash case, 0x) never gets a second owner.
 				`INSERT OR IGNORE INTO order_payments
 				 (id, order_id, transaction_id, amount_units, confirmations, status,
 				 detected_at, confirmed_at, created_at, updated_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
+				 SELECT ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?
+				 WHERE NOT EXISTS (
+				  SELECT 1 FROM blockchain_transactions bt INDEXED BY blockchain_transactions_hash_nocase_idx
+				  JOIN order_payments op
+				  ON op.transaction_id = bt.network || ':' || bt.tx_hash || ':' || bt.event_index
+				  WHERE bt.network = ? AND LOWER(bt.tx_hash) IN (?, ?)
+				  AND LOWER(bt.to_address) = LOWER(?) AND op.transaction_id <> ?
+				 )`,
 			)
 			.bind(
 				paymentRowId,
@@ -94,6 +104,11 @@ export async function recordLatePayment(
 				now,
 				now,
 				now,
+				transaction.network,
+				transactionHashKey(transaction.hash),
+				`0x${transactionHashKey(transaction.hash)}`,
+				transaction.to,
+				transactionId,
 			),
 		db
 			.prepare(
