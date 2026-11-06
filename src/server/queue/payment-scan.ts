@@ -5,6 +5,7 @@ import {
 	resolvePaymentTransactionOrder,
 	transactionHashKey,
 } from "#/features/payments/server/attribution";
+import { alertUnattributedPayment } from "#/features/payments/server/owner-alert";
 import { recordPaymentTransaction } from "#/features/payments/server/process";
 import { retainUnattributedPayment } from "#/features/payments/server/unattributed";
 import type { PaymentScanMessage } from "#/features/payments/types";
@@ -408,7 +409,8 @@ export async function processScannedTransactions(
 				!(error instanceof PaymentAttributionNotFoundError)
 			)
 				throw error;
-			await retainUnattributedPayment(env.DB, transaction, error.code);
+			if (await retainUnattributedPayment(env.DB, transaction, error.code))
+				await alertUnattributedPayment(env, transaction, error.code, orderId);
 			skippedAmbiguous += 1;
 		}
 	}
