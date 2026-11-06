@@ -50,7 +50,7 @@ describe("server middleware boundaries", () => {
 		const start = read("src/start.ts");
 		const positions = [
 			"handleLivenessRequest(request)",
-			"validateRequestAuthority(request, env.DB)",
+			"validateRequestAuthority(request, env.DB",
 			"handleI18nRequest(",
 			"return applySecurityHeaders(",
 		].map((token) => entry.lastIndexOf(token));
