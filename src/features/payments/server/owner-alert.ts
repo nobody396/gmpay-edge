@@ -126,9 +126,97 @@ export async function alertPaymentReviewSubmitted(
 	);
 }
 
-/** One message per automatic settlement, so the owner can spot-check it. */
-export async function alertAutoApprovedPayment(
+export function ownerAlertConfigured(env: OwnerAlertEnv) {
+	return Boolean(
+		env.OWNER_ALERT_TELEGRAM_BOT_TOKEN && env.OWNER_ALERT_TELEGRAM_CHAT_ID,
+	);
+}
+
+/** Queues a message inside the caller's transaction; `id` deduplicates it. */
+export function ownerAlertStatement(
+	db: D1Database,
+	id: string,
+	text: string,
+	now: number,
+) {
+	return db
+		.prepare(
+			`INSERT OR IGNORE INTO owner_alert_outbox
+			 (id, text, attempt_count, next_attempt_at, sent_at, created_at, updated_at)
+			 VALUES (?, ?, 0, ?, NULL, ?, ?)`,
+		)
+		.bind(id, text, now, now, now);
+}
+
+const maxOwnerAlertAttempts = 12;
+
+/**
+ * Delivers one queued message at most once at a time: a short lease claims
+ * it, success marks it sent, failure backs off until the scheduled retry.
+ */
+export async function deliverOwnerAlert(
 	env: OwnerAlertEnv,
+	id: string,
+	request?: typeof fetch,
+	now = Date.now(),
+) {
+	if (!ownerAlertConfigured(env)) return false;
+	const claimed = await env.DB.prepare(
+		`UPDATE owner_alert_outbox SET attempt_count = attempt_count + 1,
+		 next_attempt_at = ?, updated_at = ?
+		 WHERE id = ? AND sent_at IS NULL AND next_attempt_at <= ? AND attempt_count < ?
+		 RETURNING text, attempt_count`,
+	)
+		.bind(now + 120_000, now, id, now, maxOwnerAlertAttempts)
+		.first<{ text: string; attempt_count: number }>()
+		.catch(() => null);
+	if (!claimed) return false;
+	const sent = await sendOwnerAlert(env, claimed.text, request);
+	await env.DB.prepare(
+		sent
+			? "UPDATE owner_alert_outbox SET sent_at = ?, updated_at = ? WHERE id = ?"
+			: "UPDATE owner_alert_outbox SET next_attempt_at = ?, updated_at = ? WHERE id = ?",
+	)
+		.bind(
+			sent ? now : now + Math.min(60, 2 ** claimed.attempt_count) * 60_000,
+			now,
+			id,
+		)
+		.run()
+		.catch(() => undefined);
+	return sent;
+}
+
+export async function hasDueOwnerAlerts(env: OwnerAlertEnv, now: number) {
+	if (!ownerAlertConfigured(env)) return false;
+	const row = await env.DB.prepare(
+		`SELECT 1 AS due FROM owner_alert_outbox INDEXED BY owner_alert_outbox_due_idx
+		 WHERE sent_at IS NULL AND next_attempt_at <= ? AND attempt_count < ? LIMIT 1`,
+	)
+		.bind(now, maxOwnerAlertAttempts)
+		.first();
+	return row !== null;
+}
+
+/** Scheduled retry of messages whose immediate delivery failed. */
+export async function retryOwnerAlerts(env: OwnerAlertEnv, now = Date.now()) {
+	if (!ownerAlertConfigured(env)) return { due: 0, sent: 0 };
+	const due = await env.DB.prepare(
+		`SELECT id FROM owner_alert_outbox INDEXED BY owner_alert_outbox_due_idx
+		 WHERE sent_at IS NULL AND next_attempt_at <= ? AND attempt_count < ?
+		 ORDER BY next_attempt_at LIMIT 20`,
+	)
+		.bind(now, maxOwnerAlertAttempts)
+		.all<{ id: string }>();
+	let sent = 0;
+	for (const row of due.results)
+		if (await deliverOwnerAlert(env, row.id, undefined, now)) sent += 1;
+	return { due: due.results.length, sent };
+}
+
+/** One message per automatic settlement, so the owner can spot-check it. */
+export async function automaticSettlementAlertText(
+	db: D1Database,
 	settlement: {
 		orderId: string;
 		transaction: Pick<NormalizedTransaction, "network" | "hash">;
@@ -138,12 +226,11 @@ export async function alertAutoApprovedPayment(
 		/** Set when a customer's payment review was approved automatically. */
 		reviewDescription?: string;
 	},
-	request?: typeof fetch,
 ) {
-	const order = await loadOrderSummary(env.DB, settlement.orderId).catch(
+	const order = await loadOrderSummary(db, settlement.orderId).catch(
 		() => null,
 	);
-	if (!order) return false;
+	if (!order) return null;
 	const expected = BigInt(order.expected_amount_units);
 	const difference = settlement.receivedUnits - expected;
 	const amountNote =
@@ -158,24 +245,20 @@ export async function alertAutoApprovedPayment(
 			: settlement.lateByMs > 0
 				? `订单过期后 ${Math.ceil(settlement.lateByMs / 60_000)} 分钟付款（6 小时内自动接受）`
 				: "付款在有效期内，链上确认完成时订单已过期";
-	return sendOwnerAlert(
-		env,
-		[
-			settlement.reviewDescription === undefined
-				? "✅ GMPay 自动入账（无需处理，可抽查）"
-				: "✅ 客户付款复核已自动核验通过（无需处理，可抽查）",
-			`订单：${describeOrder({ ...order, status: "已付款" })}`,
-			`实收：${unitsToDecimal(settlement.receivedUnits, order.decimals)} ${order.asset_code}（${amountNote}）`,
-			lateNote,
-			`交易：${settlement.transaction.network} ${settlement.transaction.hash}`,
-			settlement.reviewDescription === undefined
-				? null
-				: `客户说明：${settlement.reviewDescription.slice(0, 200)}`,
-		]
-			.filter(Boolean)
-			.join("\n"),
-		request,
-	);
+	return [
+		settlement.reviewDescription === undefined
+			? "✅ GMPay 自动入账（无需处理，可抽查）"
+			: "✅ 客户付款复核已自动核验通过（无需处理，可抽查）",
+		`订单：${describeOrder({ ...order, status: "已付款" })}`,
+		`实收：${unitsToDecimal(settlement.receivedUnits, order.decimals)} ${order.asset_code}（${amountNote}）`,
+		lateNote,
+		`交易：${settlement.transaction.network} ${settlement.transaction.hash}`,
+		settlement.reviewDescription === undefined
+			? null
+			: `客户说明：${settlement.reviewDescription.slice(0, 200)}`,
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function describeOrder(order: OrderSummary) {

@@ -57,6 +57,13 @@
       "when": 1792744160289,
       "tag": "0007_transaction_hash_lookup",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1793977939573,
+      "tag": "0008_owner_alert_outbox",
+      "breakpoints": true
     }
   ]
 }

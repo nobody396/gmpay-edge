@@ -433,6 +433,27 @@ export const paymentReviews = sqliteTable(
 	],
 );
 
+/** Owner Telegram messages written with the change they report, then delivered. */
+export const ownerAlertOutbox = sqliteTable(
+	"owner_alert_outbox",
+	{
+		/** Stable deduplication key: one message per reported change. */
+		id: text("id").primaryKey(),
+		text: text("text").notNull(),
+		attemptCount: integer("attempt_count").notNull().default(0),
+		nextAttemptAt: integer("next_attempt_at", {
+			mode: "timestamp_ms",
+		}).notNull(),
+		sentAt: integer("sent_at", { mode: "timestamp_ms" }),
+		...timestamps,
+	},
+	(table) => [
+		index("owner_alert_outbox_due_idx")
+			.on(table.nextAttemptAt)
+			.where(sql`${table.sentAt} IS NULL`),
+	],
+);
+
 export const exchangeRates = sqliteTable(
 	"exchange_rates",
 	{

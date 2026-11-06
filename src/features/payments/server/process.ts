@@ -6,17 +6,20 @@ import {
 	transactionHashKey,
 } from "#/features/payments/server/attribution";
 import {
-	autoApprovalApplies,
-	underpaymentToleranceUnits,
-	withinAutoApprovalWindow,
+	autoApprovalPolicy,
+	automaticSettlementBlocker,
+	underpaymentToleranceFor,
 } from "#/features/payments/server/auto-approval";
 import {
 	displayOrderAmounts,
 	type StoredOrderAmounts,
 } from "#/features/payments/server/order-amounts";
 import {
-	alertAutoApprovedPayment,
 	alertUnattributedPayment,
+	automaticSettlementAlertText,
+	deliverOwnerAlert,
+	ownerAlertConfigured,
+	ownerAlertStatement,
 } from "#/features/payments/server/owner-alert";
 import {
 	dispatchPaymentNotifications,
@@ -42,7 +45,11 @@ export async function recordPaymentTransaction(
 	orderId: string,
 	transaction: NormalizedTransaction,
 	runtime?: RuntimeConfig,
-	options: { ownerAlert?: boolean } = {},
+	options: {
+		ownerAlert?: boolean;
+		/** Approve this pending review in the same transaction as the payment. */
+		review?: { id: string; description: string };
+	} = {},
 ): Promise<{ duplicate: boolean; status: OrderStatus }> {
 	const storedOrder = await env.DB.prepare(
 		`SELECT o.id, o.external_order_id, o.status, o.amount_minor,
@@ -104,44 +111,35 @@ export async function recordPaymentTransaction(
 			throw new PaymentAttributionConflictError();
 		return { duplicate: true, status: order.status };
 	}
-	const automatic = {
-		created_at: order.created_at,
-		expires_at: order.expires_at,
-		amount_minor: order.amount_minor,
-		currency: order.currency,
-		asset_code: order.code,
-		decimals: order.decimals,
-	};
-	const toleranceUnits = underpaymentToleranceUnits(automatic);
 	const transactionId = paymentTransactionId(transaction);
-	const prior = await env.DB.prepare(
-		"SELECT amount_units, confirmations, status FROM order_payments WHERE order_id = ? AND transaction_id <> ?",
-	)
-		.bind(orderId, transactionId)
-		.all<{
-			amount_units: string;
-			confirmations: number;
-			status: PaymentAggregate["status"];
-		}>();
-	// An expired auto-approvable order accepts a transfer made within the late
-	// grace window when it completes the order; anything else stays a review.
-	const acceptLate =
-		order.status === "expired" &&
-		autoApprovalApplies(automatic) &&
-		transaction.success &&
-		transaction.canonical !== false &&
-		withinAutoApprovalWindow(automatic, transaction.timestamp.getTime()) &&
-		prior.results.reduce(
-			(sum, payment) =>
-				payment.status === "reorged" || payment.status === "rejected"
-					? sum
-					: sum + BigInt(payment.amount_units),
-			transaction.amountUnits,
-		) >=
-			BigInt(order.expected_amount_units) - toleranceUnits;
-	if (order.status === "expired" || order.status === "cancelled") {
+	const expectedUnits = BigInt(order.expected_amount_units);
+	const remainingUnits = expectedUnits - BigInt(order.received_amount_units);
+	// Automatic settlement only matters where the normal rules would stop:
+	// a late, inexact or customer-reviewed transfer on a recent CNY order.
+	const automatic =
+		order.currency === autoApprovalPolicy.currency &&
+		order.created_at >= autoApprovalPolicy.ordersCreatedFromMs &&
+		(order.status === "expired" ||
+			transaction.amountUnits !== remainingUnits ||
+			options.review !== undefined) &&
+		(await automaticSettlementBlocker(env.DB, {
+			orderId,
+			transaction,
+			...(options.review ? { reviewId: options.review.id } : {}),
+			...(options.review ? { requireFinal: true } : {}),
+		})) === null;
+	if (options.review && !automatic)
+		throw new DomainError(
+			"automatic_review_not_allowed",
+			409,
+			"Payment review needs a person",
+		);
+	if (
+		(order.status === "expired" && !automatic) ||
+		order.status === "cancelled"
+	) {
 		const policy = (await loadOperationalSettings(env.DB)).latePaymentPolicy;
-		if (policy !== "accept" && !acceptLate) {
+		if (policy !== "accept") {
 			const late = await recordLatePayment(
 				env,
 				{ ...order, paymentAmount: order.paymentAmount },
@@ -233,10 +231,21 @@ export async function recordPaymentTransaction(
 		return { duplicate: true, status: order.status };
 	}
 
+	const prior = await env.DB.prepare(
+		"SELECT amount_units, confirmations, status FROM order_payments WHERE order_id = ? AND transaction_id <> ?",
+	)
+		.bind(orderId, transactionId)
+		.all<{
+			amount_units: string;
+			confirmations: number;
+			status: PaymentAggregate["status"];
+		}>();
 	const aggregate = reconcileOrderPayment({
-		expectedUnits: BigInt(order.expected_amount_units),
+		expectedUnits,
 		requiredConfirmations: order.required_confirmations,
-		underpaymentToleranceUnits: toleranceUnits,
+		underpaymentToleranceUnits: automatic
+			? underpaymentToleranceFor(order.decimals)
+			: 0n,
 		payments: [
 			...prior.results.map((payment) => ({
 				amountUnits: BigInt(payment.amount_units),
@@ -405,6 +414,70 @@ export async function recordPaymentTransaction(
 			).bind(id, eventId, orderId, endpoint.api_key_id, now, now),
 		),
 	];
+	const settled = (status: OrderStatus) =>
+		status === "paid" || status === "overpaid";
+	const settlesNow = settled(aggregate.status) && !settled(order.status);
+	if (options.review && !settlesNow)
+		throw new DomainError(
+			"automatic_review_not_settled",
+			409,
+			"Payment review needs a person",
+		);
+	// The owner message is written in the same transaction as the settlement
+	// and delivered afterwards, so a Telegram outage cannot lose it.
+	let alertId: string | null = null;
+	if (automatic && settlesNow && options.ownerAlert !== false) {
+		const text = await automaticSettlementAlertText(env.DB, {
+			orderId,
+			transaction,
+			receivedUnits: aggregate.receivedUnits,
+			lateByMs:
+				order.status === "expired"
+					? transaction.timestamp.getTime() - order.expires_at
+					: null,
+			...(options.review
+				? { reviewDescription: options.review.description }
+				: {}),
+		});
+		if (text && ownerAlertConfigured(env)) {
+			alertId = options.review
+				? `auto-review:${options.review.id}`
+				: `auto-settle:${orderId}`;
+			statements.push(ownerAlertStatement(env.DB, alertId, text, now));
+		}
+	}
+	if (options.review)
+		statements.push(
+			env.DB.prepare(
+				`UPDATE payment_reviews SET status = 'approved', reviewer_user_id = NULL,
+				 resolution_note = ?, reviewed_at = ?, updated_at = ?
+				 WHERE id = ? AND order_id = ? AND status = 'pending'`,
+			).bind(
+				`系统自动核验通过：链上交易 ${transactionId} 已确认并入账`,
+				now,
+				now,
+				options.review.id,
+				orderId,
+			),
+			// A person decided first: roll the whole settlement back.
+			env.DB.prepare(
+				`SELECT CASE WHEN changes() = 1 THEN 1
+				 ELSE json_extract('payment review changed', '$') END`,
+			),
+			env.DB.prepare(
+				`INSERT INTO audit_logs (id, action, target_type, target_id, after, created_at)
+				 VALUES (?, 'payment_review.auto_approved', 'payment_review', ?, ?, ?)`,
+			).bind(
+				crypto.randomUUID(),
+				options.review.id,
+				JSON.stringify({
+					orderId,
+					transactionId,
+					orderStatus: aggregate.status,
+				}),
+				now,
+			),
+		);
 	try {
 		await env.DB.batch(statements);
 	} catch (error) {
@@ -458,24 +531,6 @@ export async function recordPaymentTransaction(
 		deliveries,
 		eventType,
 	);
-	const settled = (status: OrderStatus) =>
-		status === "paid" || status === "overpaid";
-	if (
-		options.ownerAlert !== false &&
-		settled(aggregate.status) &&
-		!settled(order.status) &&
-		autoApprovalApplies(automatic) &&
-		(order.status === "expired" ||
-			aggregate.receivedUnits !== BigInt(order.expected_amount_units))
-	)
-		await alertAutoApprovedPayment(env, {
-			orderId,
-			transaction,
-			receivedUnits: aggregate.receivedUnits,
-			lateByMs:
-				order.status === "expired"
-					? transaction.timestamp.getTime() - order.expires_at
-					: null,
-		});
+	if (alertId) await deliverOwnerAlert(env, alertId);
 	return { duplicate: false, status: aggregate.status };
 }

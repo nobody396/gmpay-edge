@@ -12,6 +12,7 @@ import {
 import { submitCheckoutTransaction } from "#/features/checkout/server/submit-transaction";
 import { autoApprovePaymentReview } from "#/features/payment-reviews/server/auto-approve";
 import { autoApprovalPolicy } from "#/features/payments/server/auto-approval";
+import { retryOwnerAlerts } from "#/features/payments/server/owner-alert";
 import { recordPaymentTransaction } from "#/features/payments/server/process";
 import type {
 	NormalizedTransaction,
@@ -88,6 +89,9 @@ describe("automatic approval of USDT payments", () => {
 		status?: "pending" | "expired" | "cancelled";
 		createdAt?: number;
 		expiresAt?: number;
+		railKind?: string;
+		contract?: string | null;
+		lock?: boolean;
 	}) {
 		sequence += 1;
 		const id = String(26110700000000000000n + BigInt(sequence));
@@ -117,29 +121,42 @@ describe("automatic approval of USDT payments", () => {
 				.prepare(
 					`INSERT INTO order_payment_snapshots
 					 (order_id, receiving_method_id, receiving_method_name, rail_code, rail_kind,
-					  asset_id, asset_code, decimals, target_value, connection_id,
+					  asset_id, asset_code, decimals, contract_address, target_value, connection_id,
 					  adapter, required_confirmations, expected_amount_units, created_at)
-					 VALUES (?, 'auto-method', 'USDT TRC20', 'tron', 'chain', 'auto-asset',
-					  'USDT', 6, ?, 'auto-connection', 'tron', 20, ?, ?)`,
+					 VALUES (?, 'auto-method', 'USDT TRC20', 'tron', ?, 'auto-asset',
+					  'USDT', 6, ?, ?, 'auto-connection', 'tron', 20, ?, ?)`,
 				)
-				.bind(id, input.target, input.expectedUnits, createdAt),
+				.bind(
+					id,
+					input.railKind ?? "chain",
+					input.contract === undefined
+						? "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+						: input.contract,
+					input.target,
+					input.expectedUnits,
+					createdAt,
+				),
 			// Production keeps a collision lock per order for 24 h after expiry.
-			db
-				.prepare(
-					`INSERT INTO receiving_method_locks (id, receiving_method_id, asset_id,
+			...(input.lock === false
+				? []
+				: [
+						db
+							.prepare(
+								`INSERT INTO receiving_method_locks (id, receiving_method_id, asset_id,
 					 order_id, expected_amount_units, collision_key, expires_at, reusable_at,
 					 released_at, created_at)
 					 VALUES (?, 'auto-method', 'auto-asset', ?, ?, ?, ?, ?, NULL, ?)`,
-				)
-				.bind(
-					`lock-${id}`,
-					id,
-					input.expectedUnits,
-					`${input.target}:${input.expectedUnits}`,
-					expiresAt,
-					expiresAt + 24 * HOUR,
-					createdAt,
-				),
+							)
+							.bind(
+								`lock-${id}`,
+								id,
+								input.expectedUnits,
+								`${input.target}:${input.expectedUnits}`,
+								expiresAt,
+								expiresAt + 24 * HOUR,
+								createdAt,
+							),
+					]),
 		]);
 		return id;
 	}
@@ -679,6 +696,262 @@ describe("automatic approval of USDT payments", () => {
 			await review(old, paid.hash);
 			await processScannedTransactions(env, old, [paid]);
 			expect(await paymentCount(old)).toBe(0);
+		});
+	});
+
+	describe("independent review regressions", () => {
+		function adapters(
+			observed: NormalizedTransaction | null,
+			onLookup?: () => Promise<void>,
+		) {
+			return async () => [
+				{
+					adapter: {
+						...fixedAdapter(observed),
+						getTransaction: async () => {
+							await onLookup?.();
+							return observed;
+						},
+					},
+				},
+			];
+		}
+
+		it("does not settle an exact late payment another open order could own", async () => {
+			const target = nextTarget();
+			const expiresAt = Date.now() - HOUR;
+			const late = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+				status: "expired",
+				createdAt: expiresAt - 30 * 60_000,
+				expiresAt,
+			});
+			const open = await order({
+				target,
+				expectedUnits: "100050000",
+				amountMinor: "66000",
+			});
+			const paid = transfer(target, 100_000_000n);
+			await processScannedTransactions(env, late, [paid]);
+			await processScannedTransactions(env, open, [paid]);
+			expect(await state(late)).toMatchObject({ status: "expired" });
+			expect(await state(open)).toEqual({ status: "pending", received: "0" });
+			expect(telegram.join()).not.toContain("✅");
+		});
+
+		it("sees competitors that immediate release mode hides from attribution", async () => {
+			await db
+				.prepare(
+					"INSERT INTO system_settings (key, value, is_secret, created_at, updated_at) VALUES ('orders.immediate_release_mode', 'true', 0, 0, 0)",
+				)
+				.run();
+			try {
+				const target = nextTarget();
+				const expiresAt = Date.now() - HOUR;
+				const late = await order({
+					target,
+					expectedUnits: "100000000",
+					amountMinor: "66000",
+					status: "expired",
+					createdAt: expiresAt - 30 * 60_000,
+					expiresAt,
+					lock: false,
+				});
+				const open = await order({
+					target,
+					expectedUnits: "101000000",
+					amountMinor: "66000",
+					lock: false,
+				});
+				await processScannedTransactions(env, open, [
+					transfer(target, 100_950_000n),
+				]);
+				expect(await state(open)).toEqual({ status: "pending", received: "0" });
+				expect(await state(late)).toMatchObject({ status: "expired" });
+			} finally {
+				await db
+					.prepare(
+						"DELETE FROM system_settings WHERE key = 'orders.immediate_release_mode'",
+					)
+					.run();
+			}
+		});
+
+		it("never folds held or partial payments into an automatic settlement", async () => {
+			const target = nextTarget();
+			const expiresAt = Date.now() - HOUR;
+			const id = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+				status: "expired",
+				createdAt: expiresAt - 30 * 60_000,
+				expiresAt,
+			});
+			await processScannedTransactions(env, id, [
+				transfer(target, 40_000_000n),
+			]);
+			await processScannedTransactions(env, id, [
+				transfer(target, 100_000_000n),
+			]);
+			expect(await state(id)).toMatchObject({ status: "expired" });
+			expect(telegram.join()).not.toContain("✅");
+		});
+
+		it("keeps a person's rejection when the customer resubmits the same hash", async () => {
+			const target = nextTarget();
+			const id = await order({ target, expectedUnits: "485035300" });
+			const paid = transfer(target, 486_000_000n);
+			const rejected = await review(id, paid.hash);
+			await db
+				.prepare("UPDATE payment_reviews SET status = 'rejected' WHERE id = ?")
+				.bind(rejected)
+				.run();
+			const again = await review(id, paid.hash);
+			await expect(
+				autoApprovePaymentReview(env, again, adapters(paid)),
+			).resolves.toEqual({ approved: false });
+			expect(await state(id)).toEqual({ status: "pending", received: "0" });
+		});
+
+		it("lets an owner rejection made during the chain lookup win", async () => {
+			const target = nextTarget();
+			const id = await order({ target, expectedUnits: "485035300" });
+			const paid = transfer(target, 486_000_000n);
+			const reviewId = await review(id, paid.hash);
+			await expect(
+				autoApprovePaymentReview(
+					env,
+					reviewId,
+					adapters(paid, async () => {
+						await db
+							.prepare(
+								"UPDATE payment_reviews SET status = 'rejected' WHERE id = ?",
+							)
+							.bind(reviewId)
+							.run();
+					}),
+				),
+			).resolves.toEqual({ approved: false });
+			expect(await state(id)).toEqual({ status: "pending", received: "0" });
+			expect(await paymentCount(id)).toBe(0);
+			expect(telegram).toHaveLength(0);
+		});
+
+		it("checks the transfer time on reviews whatever the order state", async () => {
+			const target = nextTarget();
+			const createdAt = Math.floor(Date.now() / 1000) * 1000 + 900;
+			const id = await order({
+				target,
+				expectedUnits: "485035300",
+				createdAt,
+				expiresAt: createdAt + 30 * 60_000,
+			});
+			const early = transfer(target, 485_035_300n, {
+				timestamp: new Date(createdAt - 900),
+			});
+			await expect(
+				autoApprovePaymentReview(
+					env,
+					await review(id, early.hash),
+					adapters(early),
+				),
+			).resolves.toEqual({ approved: false });
+			expect(await paymentCount(id)).toBe(0);
+
+			const target2 = nextTarget();
+			const stale = await order({
+				target: target2,
+				expectedUnits: "485035300",
+				createdAt: Date.now() - 8 * HOUR,
+				expiresAt: Date.now() - 7.5 * HOUR,
+			});
+			const tooLate = transfer(target2, 485_035_300n);
+			await expect(
+				autoApprovePaymentReview(
+					env,
+					await review(stale, tooLate.hash),
+					adapters(tooLate),
+				),
+			).resolves.toEqual({ approved: false });
+			expect(await paymentCount(stale)).toBe(0);
+		});
+
+		it("leaves exchange-ledger USDT to a person", async () => {
+			const target = nextTarget();
+			const id = await order({
+				target,
+				expectedUnits: "485035300",
+				railKind: "exchange",
+				contract: null,
+			});
+			const result = await processScannedTransactions(env, id, [
+				transfer(target, 486_000_000n),
+			]);
+			expect(result.skippedAmbiguous).toBe(1);
+			expect(await state(id)).toEqual({ status: "pending", received: "0" });
+		});
+
+		it("never lets a tail transfer settle a tolerance-paid order twice", async () => {
+			const target = nextTarget();
+			const id = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+			});
+			await processScannedTransactions(env, id, [
+				transfer(target, 99_950_000n),
+			]);
+			expect(await state(id)).toMatchObject({ status: "paid" });
+			const tail = await processScannedTransactions(env, id, [
+				transfer(target, 50_000n),
+			]);
+			expect(tail.skippedAmbiguous).toBe(1);
+			const paidEvents = await db
+				.prepare(
+					"SELECT COUNT(*) AS n FROM webhook_events WHERE order_id = ? AND type IN ('order.paid','order.overpaid')",
+				)
+				.bind(id)
+				.first<{ n: number }>();
+			expect(paidEvents?.n).toBe(1);
+		});
+
+		it("keeps an automatic-settlement message until Telegram accepts it", async () => {
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async () => new Response("busy", { status: 429 })),
+			);
+			const target = nextTarget();
+			const id = await order({ target, expectedUnits: "485035300" });
+			await processScannedTransactions(env, id, [
+				transfer(target, 486_000_000n),
+			]);
+			expect(await state(id)).toMatchObject({ status: "overpaid" });
+			const pending = await db
+				.prepare(
+					"SELECT sent_at, attempt_count FROM owner_alert_outbox WHERE id = ?",
+				)
+				.bind(`auto-settle:${id}`)
+				.first<{ sent_at: number | null; attempt_count: number }>();
+			expect(pending).toEqual({ sent_at: null, attempt_count: 1 });
+
+			const delivered: string[] = [];
+			vi.stubGlobal(
+				"fetch",
+				vi.fn(async (_url: unknown, init?: RequestInit) => {
+					delivered.push(String(JSON.parse(String(init?.body)).text));
+					return Response.json({
+						ok: true,
+						result: { message_id: 2, date: 0, chat: { id: -1, type: "group" } },
+					});
+				}),
+			);
+			await retryOwnerAlerts(env, Date.now() + HOUR);
+			await retryOwnerAlerts(env, Date.now() + 2 * HOUR);
+			expect(delivered).toHaveLength(1);
+			expect(delivered[0]).toContain("GMPay 自动入账");
 		});
 	});
 });

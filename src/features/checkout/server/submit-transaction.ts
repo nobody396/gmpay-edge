@@ -61,11 +61,10 @@ export async function submitCheckoutTransaction(
 	createAdapters: AdapterFactory = createReceivingMethodAdapters,
 	allowLate = false,
 	options: {
-		/** The pending review being decided automatically for this order. */
-		reviewOrderId?: string;
+		/** Approve this pending review atomically with the payment. */
+		review?: { id: string; description: string };
 		/** Refuse a transfer that has not reached the required confirmations. */
 		requireFinal?: boolean;
-		ownerAlert?: boolean;
 	} = {},
 ): Promise<CheckoutTransactionResult> {
 	const orderId = orderIdPathSchema.parse(input.orderId);
@@ -73,7 +72,8 @@ export async function submitCheckoutTransaction(
 	const order = await env.DB.prepare(
 		`SELECT o.status, o.expires_at, o.created_at, o.amount_minor, o.currency,
 		 ops.target_value AS address, ops.asset_code, ops.decimals,
-		 ops.receiving_method_id, ops.required_confirmations
+		 ops.receiving_method_id, ops.required_confirmations,
+		 ops.expected_amount_units, ops.rail_kind, ops.rail_code, ops.contract_address
 		 FROM orders o
 		 JOIN order_payment_snapshots ops ON ops.order_id = o.id
 		 WHERE o.id = ? LIMIT 1`,
@@ -117,7 +117,7 @@ export async function submitCheckoutTransaction(
 			matchedTransaction,
 			orderId,
 			allowLate,
-			options.reviewOrderId,
+			options.review?.id,
 		);
 		if (attribution.orderId !== orderId) return { status: "mismatch" };
 	} catch (error) {
@@ -134,7 +134,7 @@ export async function submitCheckoutTransaction(
 		orderId,
 		matchedTransaction,
 		undefined,
-		options.ownerAlert === false ? { ownerAlert: false } : {},
+		options.review ? { review: options.review } : {},
 	);
 	return {
 		status: "accepted",

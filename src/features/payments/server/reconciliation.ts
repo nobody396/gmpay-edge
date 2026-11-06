@@ -15,7 +15,15 @@ export function reconcileOrderPayment(input: {
 	requiredConfirmations: number;
 	underpaymentToleranceUnits?: bigint;
 }): { receivedUnits: bigint; confirmedUnits: bigint; status: OrderStatus } {
-	const tolerance = input.underpaymentToleranceUnits ?? 0n;
+	// The tolerance can never waive the whole amount, and only confirmed money
+	// (not a non-positive threshold) counts as confirmed.
+	const requested = input.underpaymentToleranceUnits ?? 0n;
+	const tolerance =
+		requested <= 0n
+			? 0n
+			: requested < input.expectedUnits
+				? requested
+				: input.expectedUnits - 1n;
 	let receivedUnits = 0n;
 	let confirmedUnits = 0n;
 	for (const payment of input.payments) {
@@ -32,7 +40,7 @@ export function reconcileOrderPayment(input: {
 	const status = statusFromPayment(
 		input.expectedUnits,
 		receivedUnits,
-		confirmedUnits >= input.expectedUnits - tolerance
+		confirmedUnits > 0n && confirmedUnits >= input.expectedUnits - tolerance
 			? input.requiredConfirmations
 			: 0,
 		input.requiredConfirmations,

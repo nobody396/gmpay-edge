@@ -12,6 +12,10 @@ import {
 } from "#/features/payment-settings/server/exchange-rates";
 import { clearReusableReceivingMethodLockKeys } from "#/features/payment-settings/server/receiving-method-locks";
 import { expireOrders } from "#/features/payments/server/expiration";
+import {
+	hasDueOwnerAlerts,
+	retryOwnerAlerts,
+} from "#/features/payments/server/owner-alert";
 import { recoverProviderEventOutbox } from "#/features/payments/server/provider-event-outbox";
 import type {
 	PaymentEventSourceReconcileMessage,
@@ -161,6 +165,9 @@ async function runMaintenanceInvocation(
 			: null,
 	]);
 
+	// Owner messages whose immediate delivery failed; checked only when the
+	// channel is configured, so most invocations add a single indexed probe.
+	const ownerAlertsDue = await hasDueOwnerAlerts(env, now).catch(() => false);
 	const tracked = (name: string, run: () => Promise<unknown>) => ({
 		name,
 		run: () => runScheduledTask(name, run),
@@ -188,6 +195,7 @@ async function runMaintenanceInvocation(
 			}),
 		dueWork.orderExpiration &&
 			tracked("order_expiration", () => dependencies.expire(env, now)),
+		ownerAlertsDue && tracked("owner_alerts", () => retryOwnerAlerts(env, now)),
 		cryptoRateDispatch &&
 			tracked("crypto_rate_sync", () =>
 				enqueueRateSync(env, cryptoRateDispatch, now),
