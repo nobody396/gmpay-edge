@@ -13,7 +13,9 @@ export function reconcileOrderPayment(input: {
 	expectedUnits: bigint;
 	payments: readonly PaymentAggregate[];
 	requiredConfirmations: number;
+	underpaymentToleranceUnits?: bigint;
 }): { receivedUnits: bigint; confirmedUnits: bigint; status: OrderStatus } {
+	const tolerance = input.underpaymentToleranceUnits ?? 0n;
 	let receivedUnits = 0n;
 	let confirmedUnits = 0n;
 	for (const payment of input.payments) {
@@ -30,8 +32,11 @@ export function reconcileOrderPayment(input: {
 	const status = statusFromPayment(
 		input.expectedUnits,
 		receivedUnits,
-		confirmedUnits >= input.expectedUnits ? input.requiredConfirmations : 0,
+		confirmedUnits >= input.expectedUnits - tolerance
+			? input.requiredConfirmations
+			: 0,
 		input.requiredConfirmations,
+		tolerance,
 	);
 	return { receivedUnits, confirmedUnits, status };
 }

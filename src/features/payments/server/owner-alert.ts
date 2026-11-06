@@ -36,6 +36,8 @@ const unattributedReasons: Record<string, string> = {
 	payment_review_pending: "该订单客户已提交付款复核",
 	payment_transfer_already_attributed: "同一笔转账已记到别的订单",
 	payment_attribution_not_found: "没有找到匹配的订单",
+	payment_late_review_required:
+		"订单过期后才到账，且不满足自动入账条件（过期超过 6 小时、金额不足、超过 ¥3300 或是旧订单）",
 };
 
 /**
@@ -117,6 +119,58 @@ export async function alertPaymentReviewSubmitted(
 			`交易：${review.transactionHash ?? "客户未填写"}`,
 			`客户说明：${review.description.slice(0, 200)}`,
 			"需要在 GMPay 后台「付款复核」处理。",
+		]
+			.filter(Boolean)
+			.join("\n"),
+		request,
+	);
+}
+
+/** One message per automatic settlement, so the owner can spot-check it. */
+export async function alertAutoApprovedPayment(
+	env: OwnerAlertEnv,
+	settlement: {
+		orderId: string;
+		transaction: Pick<NormalizedTransaction, "network" | "hash">;
+		receivedUnits: bigint;
+		/** Transfer time minus expiry; null when the order was still open. */
+		lateByMs: number | null;
+		/** Set when a customer's payment review was approved automatically. */
+		reviewDescription?: string;
+	},
+	request?: typeof fetch,
+) {
+	const order = await loadOrderSummary(env.DB, settlement.orderId).catch(
+		() => null,
+	);
+	if (!order) return false;
+	const expected = BigInt(order.expected_amount_units);
+	const difference = settlement.receivedUnits - expected;
+	const amountNote =
+		difference === 0n
+			? "金额一致"
+			: difference > 0n
+				? `多付 ${unitsToDecimal(difference, order.decimals)} ${order.asset_code}`
+				: `少付 ${unitsToDecimal(-difference, order.decimals)} ${order.asset_code}（在 0.1 以内）`;
+	const lateNote =
+		settlement.lateByMs === null
+			? null
+			: settlement.lateByMs > 0
+				? `订单过期后 ${Math.ceil(settlement.lateByMs / 60_000)} 分钟付款（6 小时内自动接受）`
+				: "付款在有效期内，链上确认完成时订单已过期";
+	return sendOwnerAlert(
+		env,
+		[
+			settlement.reviewDescription === undefined
+				? "✅ GMPay 自动入账（无需处理，可抽查）"
+				: "✅ 客户付款复核已自动核验通过（无需处理，可抽查）",
+			`订单：${describeOrder({ ...order, status: "已付款" })}`,
+			`实收：${unitsToDecimal(settlement.receivedUnits, order.decimals)} ${order.asset_code}（${amountNote}）`,
+			lateNote,
+			`交易：${settlement.transaction.network} ${settlement.transaction.hash}`,
+			settlement.reviewDescription === undefined
+				? null
+				: `客户说明：${settlement.reviewDescription.slice(0, 200)}`,
 		]
 			.filter(Boolean)
 			.join("\n"),

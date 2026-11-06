@@ -6,6 +6,11 @@ import {
 	PaymentAttributionNotFoundError,
 	resolvePaymentTransactionOrder,
 } from "#/features/payments/server/attribution";
+import {
+	type AutoApprovalOrder,
+	autoApprovalApplies,
+	withinAutoApprovalWindow,
+} from "#/features/payments/server/auto-approval";
 import type { PaymentRuntime } from "#/features/payments/server/payment-events";
 import { recordPaymentTransaction } from "#/features/payments/server/process";
 import { paymentTransactionId } from "#/features/payments/server/reconciliation";
@@ -37,75 +42,82 @@ type AdapterFactory = (
 	receivingMethodId: string,
 ) => Promise<Array<{ adapter: PaymentAdapter<unknown> }>>;
 
+type SubmissionOrder = AutoApprovalOrder & {
+	status: string;
+	address: string;
+	receiving_method_id: string;
+	required_confirmations: number;
+};
+
 /**
  * Verifies a payer-supplied transaction against the immutable order target before
  * sending it through the same idempotent accounting path used by scheduled scans.
+ * Customers may also complete an expired order that qualifies for automatic
+ * approval, as long as the transfer itself falls inside the late grace window.
  */
 export async function submitCheckoutTransaction(
 	env: PaymentRuntime,
 	input: CheckoutTransactionSubmission,
 	createAdapters: AdapterFactory = createReceivingMethodAdapters,
 	allowLate = false,
+	options: {
+		/** The pending review being decided automatically for this order. */
+		reviewOrderId?: string;
+		/** Refuse a transfer that has not reached the required confirmations. */
+		requireFinal?: boolean;
+		ownerAlert?: boolean;
+	} = {},
 ): Promise<CheckoutTransactionResult> {
 	const orderId = orderIdPathSchema.parse(input.orderId);
 	const transactionHash = transactionHashSchema.parse(input.transactionHash);
 	const order = await env.DB.prepare(
-		`SELECT o.status, o.expires_at, ops.target_value AS address,
-		 ops.asset_code, ops.receiving_method_id
+		`SELECT o.status, o.expires_at, o.created_at, o.amount_minor, o.currency,
+		 ops.target_value AS address, ops.asset_code, ops.decimals,
+		 ops.receiving_method_id, ops.required_confirmations
 		 FROM orders o
 		 JOIN order_payment_snapshots ops ON ops.order_id = o.id
 		 WHERE o.id = ? LIMIT 1`,
 	)
 		.bind(orderId)
-		.first<{
-			status: string;
-			expires_at: number;
-			address: string;
-			asset_code: string;
-			receiving_method_id: string;
-		}>();
+		.first<SubmissionOrder>();
 	if (!order) return { status: "unavailable" };
+	const automaticLate =
+		!allowLate && order.status === "expired" && autoApprovalApplies(order);
 	if (
 		!["pending", "confirming", "partially_paid"].includes(order.status) &&
-		!(allowLate && ["expired", "cancelled"].includes(order.status))
+		!(allowLate && ["expired", "cancelled"].includes(order.status)) &&
+		!automaticLate
 	) {
 		return { status: "unavailable" };
 	}
 
-	const adapters = (
-		await createAdapters(env.DB, order.receiving_method_id)
-	).map((candidate) => candidate.adapter);
-	if (!adapters.length) return { status: "unavailable" };
-	let matchedTransaction: NormalizedTransaction | undefined;
-	let sawTransaction = false;
-	for (const adapter of adapters) {
-		try {
-			const transaction = await adapter.getTransaction(transactionHash, {
-				address: order.address,
-				assetCode: order.asset_code,
-			});
-			if (!transaction) continue;
-			sawTransaction = true;
-			const target = await adapter.createPaymentTarget({
-				address: order.address,
-				expiresAt: new Date(order.expires_at),
-			});
-			if (adapter.validatePayment(transaction, target, order.asset_code)) {
-				matchedTransaction = transaction;
-				break;
-			}
-		} catch (error) {
-			if (!adapter.isRetryable(adapter.classifyError(error))) throw error;
-		}
-	}
-	if (!matchedTransaction)
-		return { status: sawTransaction ? "mismatch" : "not_found" };
+	const verified = await fetchOrderTransaction(
+		env.DB,
+		order,
+		transactionHash,
+		createAdapters,
+	);
+	if (verified.status !== "matched") return verified;
+	const matchedTransaction = verified.transaction;
+	if (
+		automaticLate &&
+		!withinAutoApprovalWindow(order, matchedTransaction.timestamp.getTime())
+	)
+		return { status: "mismatch" };
+	if (
+		options.requireFinal &&
+		(!matchedTransaction.success ||
+			matchedTransaction.canonical === false ||
+			matchedTransaction.confirmations < order.required_confirmations)
+	)
+		return { status: "unavailable" };
 	try {
 		const attribution = await resolvePaymentTransactionOrder(
 			env.DB,
 			matchedTransaction,
 			orderId,
 			allowLate,
+			options.reviewOrderId,
 		);
 		if (attribution.orderId !== orderId) return { status: "mismatch" };
 	} catch (error) {
@@ -121,10 +133,48 @@ export async function submitCheckoutTransaction(
 		env,
 		orderId,
 		matchedTransaction,
+		undefined,
+		options.ownerAlert === false ? { ownerAlert: false } : {},
 	);
 	return {
 		status: "accepted",
 		orderStatus: result.status,
 		transactionId: paymentTransactionId(matchedTransaction),
 	};
+}
+
+/** Looks the hash up on chain ourselves; the payer's hash is only a lookup hint. */
+async function fetchOrderTransaction(
+	db: D1Database,
+	order: SubmissionOrder,
+	transactionHash: string,
+	createAdapters: AdapterFactory,
+): Promise<
+	| { status: "matched"; transaction: NormalizedTransaction }
+	| { status: "not_found" | "mismatch" | "unavailable" }
+> {
+	const adapters = (await createAdapters(db, order.receiving_method_id)).map(
+		(candidate) => candidate.adapter,
+	);
+	if (!adapters.length) return { status: "unavailable" };
+	let sawTransaction = false;
+	for (const adapter of adapters) {
+		try {
+			const transaction = await adapter.getTransaction(transactionHash, {
+				address: order.address,
+				assetCode: order.asset_code,
+			});
+			if (!transaction) continue;
+			sawTransaction = true;
+			const target = await adapter.createPaymentTarget({
+				address: order.address,
+				expiresAt: new Date(order.expires_at),
+			});
+			if (adapter.validatePayment(transaction, target, order.asset_code))
+				return { status: "matched", transaction };
+		} catch (error) {
+			if (!adapter.isRetryable(adapter.classifyError(error))) throw error;
+		}
+	}
+	return { status: sawTransaction ? "mismatch" : "not_found" };
 }

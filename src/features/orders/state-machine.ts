@@ -97,9 +97,12 @@ export function statusFromPayment(
 	receivedUnits: bigint,
 	confirmations: number,
 	requiredConfirmations: number,
+	/** Shortfall an automatically approvable order may carry and still be paid. */
+	underpaymentToleranceUnits = 0n,
 ): OrderStatus {
 	if (receivedUnits === 0n) return "pending";
-	if (receivedUnits < expectedUnits) return "partially_paid";
+	if (receivedUnits < expectedUnits - underpaymentToleranceUnits)
+		return "partially_paid";
 	if (confirmations < requiredConfirmations) return "confirming";
 	if (receivedUnits > expectedUnits) return "overpaid";
 	return "paid";

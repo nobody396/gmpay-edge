@@ -6,9 +6,18 @@ import {
 	transactionHashKey,
 } from "#/features/payments/server/attribution";
 import {
+	autoApprovalApplies,
+	underpaymentToleranceUnits,
+	withinAutoApprovalWindow,
+} from "#/features/payments/server/auto-approval";
+import {
 	displayOrderAmounts,
 	type StoredOrderAmounts,
 } from "#/features/payments/server/order-amounts";
+import {
+	alertAutoApprovedPayment,
+	alertUnattributedPayment,
+} from "#/features/payments/server/owner-alert";
 import {
 	dispatchPaymentNotifications,
 	matchingWebhookEndpoints,
@@ -33,10 +42,12 @@ export async function recordPaymentTransaction(
 	orderId: string,
 	transaction: NormalizedTransaction,
 	runtime?: RuntimeConfig,
+	options: { ownerAlert?: boolean } = {},
 ): Promise<{ duplicate: boolean; status: OrderStatus }> {
 	const storedOrder = await env.DB.prepare(
 		`SELECT o.id, o.external_order_id, o.status, o.amount_minor,
 		 o.currency, o.currency_decimals, o.received_amount_units, o.expires_at, o.version,
+		 o.created_at,
 		 ops.expected_amount_units, ops.asset_code AS code, ops.rail_code AS network, ops.decimals,
 		 ops.target_value AS address, ops.required_confirmations
 		 FROM orders o
@@ -53,6 +64,7 @@ export async function recordPaymentTransaction(
 				received_amount_units: string;
 				expires_at: number;
 				version: number;
+				created_at: number;
 				code: string;
 				network: string;
 				decimals: number;
@@ -92,19 +104,65 @@ export async function recordPaymentTransaction(
 			throw new PaymentAttributionConflictError();
 		return { duplicate: true, status: order.status };
 	}
+	const automatic = {
+		created_at: order.created_at,
+		expires_at: order.expires_at,
+		amount_minor: order.amount_minor,
+		currency: order.currency,
+		asset_code: order.code,
+		decimals: order.decimals,
+	};
+	const toleranceUnits = underpaymentToleranceUnits(automatic);
+	const transactionId = paymentTransactionId(transaction);
+	const prior = await env.DB.prepare(
+		"SELECT amount_units, confirmations, status FROM order_payments WHERE order_id = ? AND transaction_id <> ?",
+	)
+		.bind(orderId, transactionId)
+		.all<{
+			amount_units: string;
+			confirmations: number;
+			status: PaymentAggregate["status"];
+		}>();
+	// An expired auto-approvable order accepts a transfer made within the late
+	// grace window when it completes the order; anything else stays a review.
+	const acceptLate =
+		order.status === "expired" &&
+		autoApprovalApplies(automatic) &&
+		transaction.success &&
+		transaction.canonical !== false &&
+		withinAutoApprovalWindow(automatic, transaction.timestamp.getTime()) &&
+		prior.results.reduce(
+			(sum, payment) =>
+				payment.status === "reorged" || payment.status === "rejected"
+					? sum
+					: sum + BigInt(payment.amount_units),
+			transaction.amountUnits,
+		) >=
+			BigInt(order.expected_amount_units) - toleranceUnits;
 	if (order.status === "expired" || order.status === "cancelled") {
 		const policy = (await loadOperationalSettings(env.DB)).latePaymentPolicy;
-		if (policy !== "accept") {
-			return recordLatePayment(
+		if (policy !== "accept" && !acceptLate) {
+			const late = await recordLatePayment(
 				env,
 				{ ...order, paymentAmount: order.paymentAmount },
 				transaction,
 				policy,
 			);
+			if (
+				!late.duplicate &&
+				policy === "review" &&
+				options.ownerAlert !== false
+			)
+				await alertUnattributedPayment(
+					env,
+					transaction,
+					"payment_late_review_required",
+					orderId,
+				);
+			return late;
 		}
 	}
 
-	const transactionId = paymentTransactionId(transaction);
 	const existingPayment = await env.DB.prepare(
 		`SELECT op.id, op.order_id, op.amount_units, op.confirmations, op.status,
 		 bt.block_hash, bt.status AS blockchain_status
@@ -175,18 +233,10 @@ export async function recordPaymentTransaction(
 		return { duplicate: true, status: order.status };
 	}
 
-	const prior = await env.DB.prepare(
-		"SELECT amount_units, confirmations, status FROM order_payments WHERE order_id = ? AND transaction_id <> ?",
-	)
-		.bind(orderId, transactionId)
-		.all<{
-			amount_units: string;
-			confirmations: number;
-			status: PaymentAggregate["status"];
-		}>();
 	const aggregate = reconcileOrderPayment({
 		expectedUnits: BigInt(order.expected_amount_units),
 		requiredConfirmations: order.required_confirmations,
+		underpaymentToleranceUnits: toleranceUnits,
 		payments: [
 			...prior.results.map((payment) => ({
 				amountUnits: BigInt(payment.amount_units),
@@ -408,5 +458,24 @@ export async function recordPaymentTransaction(
 		deliveries,
 		eventType,
 	);
+	const settled = (status: OrderStatus) =>
+		status === "paid" || status === "overpaid";
+	if (
+		options.ownerAlert !== false &&
+		settled(aggregate.status) &&
+		!settled(order.status) &&
+		autoApprovalApplies(automatic) &&
+		(order.status === "expired" ||
+			aggregate.receivedUnits !== BigInt(order.expected_amount_units))
+	)
+		await alertAutoApprovedPayment(env, {
+			orderId,
+			transaction,
+			receivedUnits: aggregate.receivedUnits,
+			lateByMs:
+				order.status === "expired"
+					? transaction.timestamp.getTime() - order.expires_at
+					: null,
+		});
 	return { duplicate: false, status: aggregate.status };
 }
