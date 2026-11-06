@@ -16,8 +16,8 @@ import type { NormalizedTransaction } from "#/integrations/chains/types";
  * went live qualify, so reviews and transfers that already exist stay manual.
  */
 export const autoApprovalPolicy = {
-	/** Orders created earlier are never auto-approved (set at deployment). */
-	ordersCreatedFromMs: Date.parse("2026-11-06T17:00:00Z"),
+	/** 2026-11-07 01:30 Beijing, after this went live; earlier orders stay manual. */
+	ordersCreatedFromMs: Date.parse("2026-11-06T17:30:00Z"),
 	currency: "CNY",
 	/** ¥3300: just above the most expensive item sold today (¥3200). */
 	maxOrderAmountMinor: 330_000n,

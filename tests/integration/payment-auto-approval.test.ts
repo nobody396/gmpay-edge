@@ -9,6 +9,7 @@ import {
 	it,
 	vi,
 } from "vitest";
+import { submitCheckoutTransactionForRequest } from "#/features/checkout/server/request-actions";
 import { submitCheckoutTransaction } from "#/features/checkout/server/submit-transaction";
 import { autoApprovePaymentReview } from "#/features/payment-reviews/server/auto-approve";
 import { autoApprovalPolicy } from "#/features/payments/server/auto-approval";
@@ -952,6 +953,172 @@ describe("automatic approval of USDT payments", () => {
 			await retryOwnerAlerts(env, Date.now() + 2 * HOUR);
 			expect(delivered).toHaveLength(1);
 			expect(delivered[0]).toContain("GMPay 自动入账");
+		});
+	});
+
+	describe("second security review regressions", () => {
+		function racingDb(beforeFirstBatch: () => Promise<void>) {
+			let injected = false;
+			return new Proxy(db, {
+				get(target, key) {
+					if (key === "batch")
+						return async (statements: D1PreparedStatement[]) => {
+							if (!injected) {
+								injected = true;
+								await beforeFirstBatch();
+							}
+							return db.batch(statements);
+						};
+					const value = Reflect.get(target, key);
+					return typeof value === "function" ? value.bind(target) : value;
+				},
+			});
+		}
+
+		it("notifies the owner when a submitted hash settles an order", async () => {
+			const target = nextTarget();
+			const id = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+			});
+			const paid = transfer(target, 99_950_000n);
+			await expect(
+				submitCheckoutTransactionForRequest(
+					env,
+					{ orderId: id, transactionHash: paid.hash },
+					"local-test",
+					async () => [{ adapter: fixedAdapter(paid) }],
+				),
+			).resolves.toMatchObject({ status: "accepted", orderStatus: "paid" });
+			expect(telegram).toHaveLength(1);
+		});
+
+		it("lets a review opened during settlement stop it", async () => {
+			const target = nextTarget();
+			const id = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+			});
+			const paid = transfer(target, 99_950_000n);
+			let reviewId = "";
+			await expect(
+				processScannedTransactions(
+					{
+						...env,
+						DB: racingDb(async () => {
+							reviewId = await review(id, paid.hash);
+							await db
+								.prepare(
+									"UPDATE payment_reviews SET status = 'rejected' WHERE id = ?",
+								)
+								.bind(reviewId)
+								.run();
+						}),
+					},
+					id,
+					[paid],
+				),
+			).rejects.toThrow();
+			expect(await state(id)).toEqual({ status: "pending", received: "0" });
+			expect(await paymentCount(id)).toBe(0);
+			expect(telegram).toHaveLength(0);
+			// The next scan sees the person's decision and leaves it alone.
+			await processScannedTransactions(env, id, [paid]);
+			expect(await state(id)).toEqual({ status: "pending", received: "0" });
+		});
+
+		it("settles once when an automatic review and a scan race", async () => {
+			const target = nextTarget();
+			const id = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+			});
+			const paid = transfer(target, 99_950_000n);
+			let reviewId = "";
+			await processScannedTransactions(
+				{
+					...env,
+					DB: racingDb(async () => {
+						reviewId = await review(id, paid.hash);
+						await autoApprovePaymentReview(env, reviewId, async () => [
+							{ adapter: fixedAdapter(paid) },
+						]);
+					}),
+				},
+				id,
+				[paid],
+			).catch(() => undefined);
+			expect(await state(id)).toEqual({ status: "paid", received: "99950000" });
+			expect(await paymentCount(id)).toBe(1);
+			expect(telegram).toHaveLength(1);
+		});
+
+		it("never credits one transfer to two orders under identity variants", async () => {
+			const target = nextTarget();
+			const first = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+				lock: false,
+			});
+			const second = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+				lock: false,
+			});
+			const paid = transfer(target, 100_000_000n);
+			const variant = {
+				...paid,
+				hash: `0x${paid.hash.toUpperCase()}`,
+				eventIndex: 2,
+			};
+			const results = await Promise.allSettled([
+				recordPaymentTransaction(env, first, paid),
+				recordPaymentTransaction(env, second, variant),
+			]);
+			expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+			expect((await paymentCount(first)) + (await paymentCount(second))).toBe(
+				1,
+			);
+		});
+
+		it("keeps a held late payment from re-crediting a transfer another order owns", async () => {
+			const target = nextTarget();
+			const late = await order({
+				target,
+				expectedUnits: "99950000",
+				amountMinor: "66000",
+				status: "expired",
+				createdAt: Date.now() - 26 * HOUR,
+				expiresAt: Date.now() - 25 * HOUR,
+				lock: false,
+			});
+			const fresh = await order({
+				target,
+				expectedUnits: "100000000",
+				amountMinor: "66000",
+			});
+			const paid = transfer(target, 99_950_000n);
+			const variant = { ...paid, eventIndex: 2 };
+			await expect(
+				submitCheckoutTransaction(
+					{
+						...env,
+						DB: racingDb(async () => {
+							await processScannedTransactions(env, fresh, [paid]);
+						}),
+					},
+					{ orderId: late, transactionHash: paid.hash },
+					async () => [{ adapter: fixedAdapter(variant) }],
+					true,
+				),
+			).rejects.toThrow();
+			expect(await state(fresh)).toMatchObject({ status: "paid" });
+			expect(await paymentCount(late)).toBe(0);
 		});
 	});
 });

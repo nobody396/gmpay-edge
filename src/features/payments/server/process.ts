@@ -446,6 +446,16 @@ export async function recordPaymentTransaction(
 			statements.push(ownerAlertStatement(env.DB, alertId, text, now));
 		}
 	}
+	// A review opened or decided after the authority ran still stops an
+	// automatic settlement: re-check inside the transaction.
+	if (automatic)
+		statements.push(
+			env.DB.prepare(
+				`SELECT CASE WHEN EXISTS (SELECT 1 FROM payment_reviews
+				 WHERE order_id = ? AND status IN ('pending','rejected') AND id <> ?)
+				 THEN json_extract('payment review opened', '$') ELSE 1 END`,
+			).bind(orderId, options.review?.id ?? ""),
+		);
 	if (options.review)
 		statements.push(
 			env.DB.prepare(
